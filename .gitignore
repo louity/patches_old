@@ -1,0 +1,8 @@
+*.pyc
+**/*.swp
+slurm-*.out
+*filter.t7
+**/__pycache__
+patches
+data
+checkpoints
