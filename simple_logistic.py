@@ -27,6 +27,7 @@ parser.add_argument('--no_padding', action='store_true', help='no padding used')
 parser.add_argument('--patches_file', help=".t7 file containing patches", default='')
 parser.add_argument('--correct_padding', action='store_true', help='use image instead of 0 padding')
 parser.add_argument('--n_channel_convolution', default=256, type=int)
+parser.add_argument('--n_channel_convolution_scale_1', default=0, type=int)
 parser.add_argument('--spatialsize_convolution', default=6, type=int)
 parser.add_argument('--padding_mode', default='constant', choices=['constant', 'reflect', 'symmetric'], help='type of padding for torch RandomCrop')
 parser.add_argument('--learn_patches', action='store_true', help='learn the patches by SGD')
@@ -51,6 +52,7 @@ parser.add_argument('--separable_convolution', action='store_true', help='makes 
 parser.add_argument('--n_bagging_patches', type=int, default=0, help='do model bagging in the patches dimension')
 parser.add_argument('--convolutional_classifier', type=int, default=0, help='size of the convolution for convolutional classifier')
 parser.add_argument('--convolutional_loss', action='store_true', help='use convolutional loss')
+parser.add_argument('--lambda_1', default=0., type=float, help='l1 penalty on the patches')
 
 # parameters of the optimizer
 parser.add_argument('--batchsize', type=int, default=512)
@@ -97,6 +99,7 @@ learning_rates = ast.literal_eval(args.lr_schedule)
 
 # Extract the parameters
 n_channel_convolution = args.n_channel_convolution
+n_channel_convolution_scale_1 = args.n_channel_convolution_scale_1
 stride_convolution = args.stride_convolution
 spatialsize_convolution = args.spatialsize_convolution
 stride_avg_pooling = args.stride_avg_pooling
@@ -194,6 +197,7 @@ zca_str = 'nozca' if args.no_zca else f'zcabias{args.zca_bias}'
 default_patches_file = f'patches/{args.dataset}_seed{args.numpy_seed}_n{args.n_channel_convolution}_size{args.spatialsize_convolution}_{zca_str}_filter.t7'
 patches_file = args.patches_file if args.patches_file else default_patches_file
 
+
 if args.patch_distribution == 'empirical':
     if not os.path.exists(patches_file) or args.force_recompute:
             t = None
@@ -241,6 +245,107 @@ elif args.patch_distribution == 'random':
     kernel_convolution /= kernel_convolution.norm(p=2, dim=1, keepdim=True)
     kernel_convolution = kernel_convolution.view(kernel_convolution.size(0), 3, args.spatialsize_convolution, args.spatialsize_convolution).contiguous()
 
+
+if n_channel_convolution_scale_1 > 0 :
+    default_patches_file = f'patches/{args.dataset}_seed{args.numpy_seed}_n{args.n_channel_convolution_scale_1}_size{2*args.spatialsize_convolution}_{zca_str}_filter.t7'
+    if not os.path.exists(default_patches_file) or args.force_recompute:
+        if hasattr(trainset, 'train_data'):
+            t = trainset.train_data
+        elif hasattr(trainset, 'data'):
+            t = trainset.data
+        else:
+            raise RuntimeError
+        print(f'Trainset : {t.shape}')
+        patches_1, idx_1 = grab_patches(t, seed=args.numpy_seed, patch_size=2*spatialsize_convolution)
+        patches_1 = normalize_patches(patches_1, zca_bias=args.zca_bias, zca_whitening=(not args.no_zca))
+        idxs = np.random.choice(patches_1.shape[0], n_channel_convolution_scale_1, replace=False)
+        selected_patches_1 = patches_1[idxs].astype(np.float32)
+        kernel_convolution_1 = torch.from_numpy(selected_patches_1)
+        print(f'saving patches in file {default_patches_file}')
+        torch.save(kernel_convolution_1, default_patches_file)
+    else:
+        kernel_convolution_1 = torch.load(default_patches_file)
+
+
+def compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, train=True):
+    if args.batch_norm:
+        outputs1, outputs2 = batch_norm1(outputs1), batch_norm2(outputs2)
+
+    if args.convolutional_classifier == 0:
+        outputs1, outputs2 = outputs1.view(outputs1.size(0),-1), outputs2.view(outputs2.size(0),-1)
+
+    outputs1, outputs2 = classifier1(outputs1), classifier2(outputs2)
+    outputs = outputs1 + outputs2
+
+    if args.convolutional_classifier > 0:
+        if args.convolutional_loss and train:
+            b_size, nc1, h, w = outputs.size()
+            outputs = outputs.view(b_size, nc1, -1).transpose(1,2).reshape(b_size*h*w, nc1)
+            targets = targets.view(b_size, 1).expand(b_size, h*w).reshape(b_size*h*w)
+        elif args.separable_convolution or args.bottleneck_dim > 0:
+            outputs = classifier(outputs)
+            outputs = F.adaptive_avg_pool2d(outputs, 1)
+        else:
+            outputs = F.adaptive_avg_pool2d(outputs, 1)
+    elif args.bottleneck_dim > 0:
+        outputs = classifier(outputs)
+
+    outputs = outputs.view(outputs.size(0),-1)
+
+    return outputs, targets
+
+def create_classifier_blocks(out1, out2, args, params, n_classes):
+    batch_norm1, batch_norm2, classifier1, classifier2, classifier =  None, None, None, None, None
+
+    if args.batch_norm:
+        batch_norm1 = nn.BatchNorm2d(out1.size(1)).to(device).float()
+        batch_norm2 = nn.BatchNorm2d(out2.size(1)).to(device).float()
+        params += list(batch_norm1.parameters()) + list(batch_norm2.parameters())
+
+    if args.convolutional_classifier > 0:
+        if args.separable_convolution:
+            # convolution separable in space channels
+            if args.bottleneck_dim > 0:
+                classifier = nn.Sequential(
+                    nn.Conv2d(args.bottleneck_dim, n_classes, 1).to(device).float(),
+                    nn.Conv2d(n_classes, n_classes, args.convolutional_classifier, groups=n_classes).to(device).float()
+                )
+                classifier1 = nn.Conv2d(out1.size(1), args.bottleneck_dim, 1).to(device).float()
+                classifier2 = nn.Conv2d(out2.size(1), args.bottleneck_dim, 1).to(device).float()
+            else:
+                classifier = nn.Conv2d(n_classes, n_classes, args.convolutional_classifier, groups=n_classes).to(device).float()
+                classifier1 = nn.Conv2d(out1.size(1), n_classes, 1).to(device).float()
+                classifier2 = nn.Conv2d(out2.size(1), n_classes, 1).to(device).float()
+            params += list(classifier.parameters())
+        else:
+            if args.bottleneck_dim > 0:
+                # usual setting
+                # classifier = nn.Linear(args.bottleneck_dim, n_classes).to(device).float()
+                # params += list(classifier.parameters())
+                # classifier1 = nn.Conv2d(out1.size(1), args.bottleneck_dim, args.convolutional_classifier).to(device).float()
+                # classifier2 = nn.Conv2d(out2.size(1), args.bottleneck_dim, args.convolutional_classifier).to(device).float()
+                # less params
+                classifier = nn.Conv2d(args.bottleneck_dim, n_classes, args.convolutional_classifier).to(device).float()
+                params += list(classifier.parameters())
+                classifier1 = nn.Conv2d(out1.size(1), args.bottleneck_dim, 1).to(device).float()
+                classifier2 = nn.Conv2d(out2.size(1), args.bottleneck_dim, 1).to(device).float()
+            else:
+                classifier1 = nn.Conv2d(out1.size(1), n_classes, args.convolutional_classifier).to(device).float()
+                classifier2 = nn.Conv2d(out2.size(1), n_classes, args.convolutional_classifier).to(device).float()
+    else:
+        out1, out2 = out1.view(out1.size(0), -1), out2.view(out1.size(0), -1)
+        if args.bottleneck_dim > 0:
+            classifier = nn.Linear(args.bottleneck_dim, n_classes).to(device).float()
+            params += list(classifier.parameters())
+            classifier1 = nn.Linear(out1.size(1), args.bottleneck_dim).to(device).float()
+            classifier2 = nn.Linear(out2.size(1), args.bottleneck_dim).to(device).float()
+        else:
+            classifier1 = nn.Linear(out1.size(1), n_classes).to(device).float()
+            classifier2 = nn.Linear(out2.size(1), n_classes).to(device).float()
+
+    params += list(classifier1.parameters()) + list(classifier2.parameters())
+
+    return batch_norm1, batch_norm2, classifier1, classifier2, classifier
 
 def heaviside_half(x, bias):
     return (x > bias).half() - (x < -bias).half()
@@ -299,13 +404,10 @@ elif args.shrink == 'softshrink':
 
 # Define the model
 class Net(nn.Module):
-    def __init__(self, n_channel_convolution, spatialsize_convolution, spatialsize_avg_pooling,
-                 stride_avg_pooling, stride_convolution=1, bias=1.0, requires_grad=False):
+    def __init__(self, spatialsize_avg_pooling, stride_avg_pooling, bias=1.0):
         super(Net, self).__init__()
         self.pool_size = spatialsize_avg_pooling
         self.pool_stride = stride_avg_pooling
-        # self.conv_weight = nn.Parameter(weight, requires_grad=requires_grad)
-        self.inplace = not requires_grad
         self.bias = bias
 
     def forward(self, x, conv_weight):
@@ -313,47 +415,17 @@ class Net(nn.Module):
         out = shrink(out, self.bias)
         out1 = F.avg_pool2d(out, [self.pool_size, self.pool_size], stride=[self.pool_stride, self.pool_stride],
                             ceil_mode=True)
-        out = F.relu(out, inplace=self.inplace)
+        out = F.relu(out, inplace=True)
         out2 = F.avg_pool2d(out, [self.pool_size, self.pool_size], stride=[self.pool_stride, self.pool_stride],
                             ceil_mode=True)
         return out1, out2
-
-
-class NetPositive(nn.Module):
-    def __init__(self, n_channel_convolution, spatialsize_convolution, spatialsize_avg_pooling,
-                 stride_avg_pooling, weight, stride_convolution=1, bias=1.0, requires_grad=False):
-        super(NetPositive, self).__init__()
-        self.pool_size = spatialsize_avg_pooling
-        self.pool_stride = stride_avg_pooling
-        self.conv_weight = nn.Parameter(weight, requires_grad=requires_grad)
-        self.inplace = not requires_grad
-        self.bias = bias
-
-    def forward(self, x):
-        out = F.conv2d(x, self.conv_weight)
-        out = shrink(out, self.bias)
-
-        out1 = F.relu(-out, inplace=False)
-        out1 = F.avg_pool2d(out1, [self.pool_size, self.pool_size], stride=[self.pool_stride, self.pool_stride],
-                            ceil_mode=True)
-        out = F.relu(out, inplace=self.inplace)
-        out2 = F.avg_pool2d(out, [self.pool_size, self.pool_size], stride=[self.pool_stride, self.pool_stride],
-                            ceil_mode=True)
-        return out1, out2
-
-if args.positive_shrink:
-    NetClass = NetPositive
-else:
-    NetClass = Net
 
 criterion = nn.CrossEntropyLoss()
-net = NetClass(n_channel_convolution, spatialsize_convolution, spatialsize_avg_pooling,
-               stride_avg_pooling, stride_convolution=stride_convolution,
-               bias=args.bias, requires_grad=args.learn_patches).to(device)
+
+net = Net(spatialsize_avg_pooling, stride_avg_pooling, bias=args.bias).to(device)
 
 kernel_convolution = kernel_convolution.to(device)
 
-kernel_convolution.requires_grad = args.learn_patches
 
 x = torch.rand(1, 3, spatial_size, spatial_size).to(device)
 
@@ -363,8 +435,6 @@ if torch.cuda.is_available() and not args.learn_patches:
     x = x.half()
 
 params = []
-if args.learn_patches:
-    params.append(kernel_convolution)
 
 if args.no_cudnn:
     torch.backends.cudnn.enabled = False
@@ -374,55 +444,24 @@ else:
 
 out1, out2 = net(x, kernel_convolution)
 out1, out2 = out1.float(), out2.float()
-
 print(f'Net output size: out1 {out1.shape[-3:]} out2 {out2.shape[-3:]}')
-if args.batch_norm:
-    batch_norm1 = nn.BatchNorm2d(out1.size(1)).to(device).float()
-    batch_norm2 = nn.BatchNorm2d(out2.size(1)).to(device).float()
-    params += list(batch_norm1.parameters()) + list(batch_norm2.parameters())
 
-if args.convolutional_classifier > 0:
-    if args.separable_convolution:
-        # convolution separable in space channels
-        if args.bottleneck_dim > 0:
-            classifier = nn.Sequential(
-                nn.Conv2d(args.bottleneck_dim, n_classes, 1).to(device).float(),
-                nn.Conv2d(n_classes, n_classes, args.convolutional_classifier, groups=n_classes).to(device).float()
-            )
-            classifier1 = nn.Conv2d(out1.size(1), args.bottleneck_dim, 1).to(device).float()
-            classifier2 = nn.Conv2d(out2.size(1), args.bottleneck_dim, 1).to(device).float()
-        else:
-            classifier = nn.Conv2d(n_classes, n_classes, args.convolutional_classifier, groups=n_classes).to(device).float()
-            classifier1 = nn.Conv2d(out1.size(1), n_classes, 1).to(device).float()
-            classifier2 = nn.Conv2d(out2.size(1), n_classes, 1).to(device).float()
-        params += list(classifier.parameters())
-    else:
-        if args.bottleneck_dim > 0:
-            # usual setting
-            # classifier = nn.Linear(args.bottleneck_dim, n_classes).to(device).float()
-            # params += list(classifier.parameters())
-            # classifier1 = nn.Conv2d(out1.size(1), args.bottleneck_dim, args.convolutional_classifier).to(device).float()
-            # classifier2 = nn.Conv2d(out2.size(1), args.bottleneck_dim, args.convolutional_classifier).to(device).float()
-            # less params
-            classifier = nn.Conv2d(args.bottleneck_dim, n_classes, args.convolutional_classifier).to(device).float()
-            params += list(classifier.parameters())
-            classifier1 = nn.Conv2d(out1.size(1), args.bottleneck_dim, 1).to(device).float()
-            classifier2 = nn.Conv2d(out2.size(1), args.bottleneck_dim, 1).to(device).float()
-        else:
-            classifier1 = nn.Conv2d(out1.size(1), n_classes, args.convolutional_classifier).to(device).float()
-            classifier2 = nn.Conv2d(out2.size(1), n_classes, args.convolutional_classifier).to(device).float()
-else:
-    out1, out2 = out1.view(out1.size(0), -1), out2.view(out1.size(0), -1)
-    if args.bottleneck_dim > 0:
-        classifier = nn.Linear(args.bottleneck_dim, n_classes).to(device).float()
-        params += list(classifier.parameters())
-        classifier1 = nn.Linear(out1.size(1), args.bottleneck_dim).to(device).float()
-        classifier2 = nn.Linear(out2.size(1), args.bottleneck_dim).to(device).float()
-    else:
-        classifier1 = nn.Linear(out1.size(1), n_classes).to(device).float()
-        classifier2 = nn.Linear(out2.size(1), n_classes).to(device).float()
+batch_norm1, batch_norm2, classifier1, classifier2, classifier = create_classifier_blocks(out1, out2, args, params, n_classes)
 
-params += list(classifier1.parameters()) + list(classifier2.parameters())
+if n_channel_convolution_scale_1 > 0:
+    net_1 = Net(spatialsize_avg_pooling, stride_avg_pooling-1, bias=args.bias).to(device)
+    kernel_convolution_1 = kernel_convolution_1.to(device)
+
+    if torch.cuda.is_available() and not args.learn_patches:
+        net_1 = net_1.half()
+        kernel_convolution_1 = kernel_convolution_1.half()
+        x = x.half()
+
+    out1_1, out2_1 = net_1(x, kernel_convolution_1)
+    out1_1, out2_1 = out1_1.float(), out2_1.float()
+
+    print(f'Net scale 1 output size: out1 {out1_1.shape[-3:]} out2 {out2_1.shape[-3:]}')
+    batch_norm1_1, batch_norm2_1, classifier1_1, classifier2_1, classifier_1 = create_classifier_blocks(out1_1, out2_1, args, params, n_classes)
 
 
 print(f'Parameters shape {[param.shape for param in params]}')
@@ -435,6 +474,9 @@ del x, out1, out2
 if args.batch_norm:
     batch_norm1.eval()
     batch_norm2.eval()
+    if n_channel_convolution_scale_1 > 0:
+        batch_norm1_1.eval()
+        batch_norm2_1.eval()
 
 if args.batchsize_net > 0:
     kernel_convolution = [kernel_convolution[i*args.batchsize_net:(i+1)*args.batchsize_net] for i in range(args.n_channel_convolution // args.batchsize_net)]
@@ -452,6 +494,15 @@ if torch.cuda.is_available() and not args.learn_patches and not args.no_jit:
         del inputs
         del trial
 
+        if n_channel_convolution_scale_1 > 0:
+            trial_1 = torch.rand(args.batchsize//n_gpus, 3, spatial_size, spatial_size).to(device).half()
+            inputs_1 = {'forward': (trial_1, kernel_convolution_1)}
+            with torch.jit.optimized_execution(True):
+                net_1 = torch.jit.trace_module(net_1, inputs_1, check_trace=False, check_tolerance=False)
+            del inputs_1
+            del trial_1
+
+
 if args.multigpu and n_gpus > 1:
     print(f'{n_gpus} available, using Dataparralel for net')
     net = nn.DataParallel(net)
@@ -459,9 +510,14 @@ if args.multigpu and n_gpus > 1:
 
 def train(epoch):
     net.train()
+    if n_channel_convolution_scale_1 > 0:
+        net_1.train()
     if args.batch_norm:
         batch_norm1.train()
         batch_norm2.train()
+        if n_channel_convolution_scale_1 > 0:
+            batch_norm1_1.train()
+            batch_norm2_1.train()
 
     train_loss = 0
     total=0
@@ -469,49 +525,34 @@ def train(epoch):
 
     for batch_idx, (inputs, targets) in enumerate(trainloader):
         inputs, targets = inputs.to(device), targets.to(device)
-        if args.learn_patches:
-            outputs = net(inputs, kernel_convolution[0])
-        else:
-            with torch.no_grad():
-                if torch.cuda.is_available():
-                    inputs = inputs.half()
-                if len(kernel_convolution) > 1:
-                    outputs = []
-                    for i in range(len(kernel_convolution)):
-                        outputs.append(net(inputs, kernel_convolution[i]))
-                    outputs1 = torch.cat([out[0] for out in outputs], dim=1)
-                    outputs2 = torch.cat([out[1] for out in outputs], dim=1)
-                    del outputs
-                else:
-                    outputs1, outputs2 = net(inputs, kernel_convolution[0])
+        with torch.no_grad():
+            if torch.cuda.is_available():
+                inputs = inputs.half()
+            if len(kernel_convolution) > 1:
+                outputs = []
+                for i in range(len(kernel_convolution)):
+                    outputs.append(net(inputs, kernel_convolution[i]))
+                outputs1 = torch.cat([out[0] for out in outputs], dim=1)
+                outputs2 = torch.cat([out[1] for out in outputs], dim=1)
+                del outputs
+            else:
+                outputs1, outputs2 = net(inputs, kernel_convolution[0])
 
-                outputs1 = outputs1.float()
-                outputs2 = outputs2.float()
+            outputs1 = outputs1.float()
+            outputs2 = outputs2.float()
+
+            if n_channel_convolution_scale_1 > 0:
+                outputs1_1, outputs2_1 = net_1(inputs, kernel_convolution_1)
+                outputs1_1 = outputs1_1.float()
+                outputs2_1 = outputs2_1.float()
 
         optimizer.zero_grad()
-        if args.batch_norm:
-            outputs1, outputs2 = batch_norm1(outputs1), batch_norm2(outputs2)
 
-        if args.convolutional_classifier == 0:
-            outputs1, outputs2 = outputs1.view(outputs1.size(0),-1), outputs2.view(outputs2.size(0),-1)
+        outputs, targets = compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, train=True)
 
-        outputs1, outputs2 = classifier1(outputs1), classifier2(outputs2)
-        outputs = outputs1 + outputs2
-
-        if args.convolutional_classifier > 0:
-            if args.convolutional_loss:
-                b_size, nc1, h, w = outputs.size()
-                outputs = outputs.view(b_size, nc1, -1).transpose(1,2).reshape(b_size*h*w, nc1)
-                targets = targets.view(b_size, 1).expand(b_size, h*w).reshape(b_size*h*w)
-            elif args.separable_convolution or args.bottleneck_dim > 0:
-                outputs = classifier(outputs)
-                outputs = F.adaptive_avg_pool2d(outputs, 1)
-            else:
-                outputs = F.adaptive_avg_pool2d(outputs, 1)
-        elif args.bottleneck_dim > 0:
-            outputs = classifier(outputs)
-
-        outputs = outputs.view(outputs.size(0),-1)
+        if n_channel_convolution_scale_1 > 0:
+            outputs_1, _ = compute_classifier_outputs(outputs1_1, outputs2_1, targets, args, batch_norm1_1, batch_norm2_1, classifier1_1, classifier2_1, classifier_1, train=True)
+            outputs += outputs_1
 
         loss = criterion(outputs, targets)
         loss.backward()
@@ -539,9 +580,15 @@ def train(epoch):
 def test(epoch, loader=testloader, msg='Test'):
     global best_acc
     net.eval()
+    if n_channel_convolution_scale_1 > 0:
+        net_1.eval()
     if args.batch_norm:
         batch_norm1.eval()
         batch_norm2.eval()
+        if n_channel_convolution_scale_1 > 0:
+            batch_norm1_1.eval()
+            batch_norm2_1.eval()
+
     test_loss = 0
     correct_top1, correct_top5 = 0, 0
     total = 0
@@ -563,25 +610,16 @@ def test(epoch, loader=testloader, msg='Test'):
             outputs1 = outputs1.float()
             outputs2 = outputs2.float()
 
-            if args.batch_norm:
-                outputs1, outputs2 = batch_norm1(outputs1), batch_norm2(outputs2)
+            if n_channel_convolution_scale_1 > 0:
+                outputs1_1, outputs2_1 = net_1(inputs, kernel_convolution_1)
+                outputs1_1 = outputs1_1.float()
+                outputs2_1 = outputs2_1.float()
 
-            if args.convolutional_classifier == 0:
-                outputs1, outputs2 = outputs1.view(outputs1.size(0),-1), outputs2.view(outputs2.size(0),-1)
+            outputs, targets = compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, train=False)
 
-            outputs1, outputs2 = classifier1(outputs1), classifier2(outputs2)
-            outputs = outputs1 + outputs2
-
-            if args.convolutional_classifier > 0:
-                if args.separable_convolution or args.bottleneck_dim > 0:
-                    outputs = classifier(outputs)
-                    outputs = F.adaptive_avg_pool2d(outputs, 1)
-                else:
-                    outputs = F.adaptive_avg_pool2d(outputs, 1)
-            elif args.bottleneck_dim > 0:
-                outputs = classifier(outputs)
-
-            outputs = outputs.view(outputs.size(0),-1)
+            if n_channel_convolution_scale_1 > 0:
+                outputs_1, _ = compute_classifier_outputs(outputs1_1, outputs2_1, targets, args, batch_norm1_1, batch_norm2_1, classifier1_1, classifier2_1, classifier_1, train=False)
+                outputs += outputs_1
 
             loss = criterion(outputs, targets)
 
