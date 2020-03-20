@@ -52,7 +52,7 @@ parser.add_argument('--separable_convolution', action='store_true', help='makes 
 parser.add_argument('--n_bagging_patches', type=int, default=0, help='do model bagging in the patches dimension')
 parser.add_argument('--convolutional_classifier', type=int, default=0, help='size of the convolution for convolutional classifier')
 parser.add_argument('--convolutional_loss', action='store_true', help='use convolutional loss')
-parser.add_argument('--lambda_1', default=0., type=float, help='l1 penalty on the patches')
+parser.add_argument('--lambda_1', default=0., type=float, help='group lasso penalty on the conv')
 
 # parameters of the optimizer
 parser.add_argument('--batchsize', type=int, default=512)
@@ -555,6 +555,9 @@ def train(epoch):
             outputs += outputs_1
 
         loss = criterion(outputs, targets)
+        if args.lambda_1 > 0.:
+            group_sparsity_norm = torch.norm(torch.cat([classifier1.weight, classifier2.weight], dim=0), dim=0, p=2).mean()
+            loss += args.lambda_1 * group_sparsity_norm
         loss.backward()
         optimizer.step()
 
@@ -639,6 +642,9 @@ def test(epoch, loader=testloader, msg='Test'):
         if args.no_progress_bar:
             print(f'{msg}, epoch: {epoch}; Loss: {test_loss:.2f} | Acc: {acc1:.1f} @1 {acc5:.1f} @5 ; threshold {args.bias:.3f}')
         outputs = torch.cat(outputs_list, dim=0).cpu()
+        if args.lambda_1 > 0.:
+            group_sparsity_norm = torch.norm(torch.cat([classifier1.weight, classifier2.weight], dim=0), dim=0, p=2)
+            print(f'non_zero groups {(group_sparsity_norm != 0).int().sum()}')
 
         return acc1, outputs
 
