@@ -1,0 +1,167 @@
+stty: standard input: Inappropriate ioctl for device
+simple_logistic.py
+arguments
+Namespace(batch_norm=True, batchsize=256, batchsize_net=0, bias=0.1, bottleneck_dim=256, channel_pca=0, compute_nflops=False, compute_patch_gram_matrix=False, compute_sparsity=False, convolutional_classifier=6, convolutional_loss=False, correct_padding=False, dataset='imagenet128', force_recompute=False, lambda_1=0.001, learn_patches=False, lr_schedule='{0:1e-4,60:1e-5,80:1e-6,90:1e-7}', multigpu=False, n_bagging_patches=0, n_channel_convolution=512, n_channel_convolution_scale_1=0, nepochs=100, no_cudnn=False, no_jit=False, no_padding=False, no_progress_bar=True, no_zca=False, num_workers=4, numpy_seed=0, optimizer='Adam', padding_mode='reflect', patch_distribution='empirical', patches_file='', path_test='/mnt/home/fguth/datasets/imagenet128/out_data_val', path_train='/mnt/home/fguth/datasets/imagenet128/out_data_train', positive_shrink=False, resume='', save_best_model=False, save_model=True, separable_convolution=False, sgd_momentum=0.0, shrink='heaviside', spatialsize_avg_pooling=20, spatialsize_convolution=24, stride_avg_pooling=12, stride_convolution=1, topk_fraction=0.25, torch_seed=0, weight_decay=0.0, zca_bias=0.001)
+device: cuda
+Net output size: out1 torch.Size([512, 9, 9]) out2 torch.Size([512, 9, 9])
+Parameters shape [torch.Size([512]), torch.Size([512]), torch.Size([512]), torch.Size([512]), torch.Size([1000, 256, 6, 6]), torch.Size([1000]), torch.Size([256, 512, 1, 1]), torch.Size([256]), torch.Size([256, 512, 1, 1]), torch.Size([256])]
+N parameters : 9.481704 millions
+optimizing net execution with torch.jit
+Model will be saved at file checkpoints/imagenet128_512patches_24x24/Adam_{0:1e-4,60:1e-5,80:1e-6,90:1e-7}/96d0175635d7ae1d0ccbd9968253deb2.pth.tar.
+new lr:0.0001
+Train, epoch: 0; Loss: 5.05 | Acc: 12.6 ; threshold 0.100
+Test, epoch: 0; Loss: 4.57 | Acc: 17.6 @1 35.2 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (17.574).
+saving...
+Train, epoch: 1; Loss: 4.47 | Acc: 19.2 ; threshold 0.100
+Test, epoch: 1; Loss: 4.34 | Acc: 20.7 @1 39.4 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (20.706).
+saving...
+Train, epoch: 2; Loss: 4.27 | Acc: 21.8 ; threshold 0.100
+Test, epoch: 2; Loss: 4.21 | Acc: 22.4 @1 41.6 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (22.424).
+saving...
+Train, epoch: 3; Loss: 4.16 | Acc: 23.3 ; threshold 0.100
+Test, epoch: 3; Loss: 4.14 | Acc: 23.4 @1 42.9 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (23.386).
+saving...
+Train, epoch: 4; Loss: 4.07 | Acc: 24.4 ; threshold 0.100
+Test, epoch: 4; Loss: 4.10 | Acc: 24.1 @1 43.9 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (24.11).
+saving...
+Train, epoch: 5; Loss: 4.00 | Acc: 25.3 ; threshold 0.100
+Test, epoch: 5; Loss: 4.06 | Acc: 24.6 @1 44.3 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (24.552).
+saving...
+Train, epoch: 6; Loss: 3.95 | Acc: 26.1 ; threshold 0.100
+Test, epoch: 6; Loss: 4.00 | Acc: 25.3 @1 45.4 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (25.26).
+saving...
+Train, epoch: 7; Loss: 3.91 | Acc: 26.7 ; threshold 0.100
+Test, epoch: 7; Loss: 4.00 | Acc: 25.5 @1 45.4 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (25.494).
+saving...
+Train, epoch: 8; Loss: 3.87 | Acc: 27.2 ; threshold 0.100
+Test, epoch: 8; Loss: 3.98 | Acc: 25.7 @1 45.9 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (25.652).
+saving...
+Train, epoch: 9; Loss: 3.84 | Acc: 27.6 ; threshold 0.100
+Test, epoch: 9; Loss: 3.95 | Acc: 26.0 @1 46.4 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (25.994).
+saving...
+Train, epoch: 10; Loss: 3.81 | Acc: 28.0 ; threshold 0.100
+Test, epoch: 10; Loss: 3.94 | Acc: 26.4 @1 46.7 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (26.376).
+saving...
+Train, epoch: 11; Loss: 3.79 | Acc: 28.3 ; threshold 0.100
+Test, epoch: 11; Loss: 3.93 | Acc: 26.5 @1 46.9 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (26.54).
+saving...
+Train, epoch: 12; Loss: 3.77 | Acc: 28.6 ; threshold 0.100
+Test, epoch: 12; Loss: 3.92 | Acc: 26.5 @1 46.8 @5 ; threshold 0.100
+non_zero groups 512
+saving...
+Train, epoch: 13; Loss: 3.75 | Acc: 28.9 ; threshold 0.100
+Test, epoch: 13; Loss: 3.90 | Acc: 26.9 @1 47.1 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (26.912).
+saving...
+Train, epoch: 14; Loss: 3.73 | Acc: 29.2 ; threshold 0.100
+Test, epoch: 14; Loss: 3.90 | Acc: 26.7 @1 47.3 @5 ; threshold 0.100
+non_zero groups 512
+saving...
+Train, epoch: 15; Loss: 3.71 | Acc: 29.4 ; threshold 0.100
+Test, epoch: 15; Loss: 3.89 | Acc: 27.1 @1 47.4 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (27.058).
+saving...
+Train, epoch: 16; Loss: 3.69 | Acc: 29.7 ; threshold 0.100
+Test, epoch: 16; Loss: 3.89 | Acc: 27.1 @1 47.3 @5 ; threshold 0.100
+non_zero groups 512
+saving...
+Train, epoch: 17; Loss: 3.68 | Acc: 29.8 ; threshold 0.100
+Test, epoch: 17; Loss: 3.88 | Acc: 27.2 @1 47.7 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (27.2).
+saving...
+Train, epoch: 18; Loss: 3.67 | Acc: 30.0 ; threshold 0.100
+Test, epoch: 18; Loss: 3.87 | Acc: 27.5 @1 48.0 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (27.522).
+saving...
+Train, epoch: 19; Loss: 3.66 | Acc: 30.2 ; threshold 0.100
+Test, epoch: 19; Loss: 3.87 | Acc: 27.5 @1 47.8 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (27.54).
+saving...
+Train, epoch: 20; Loss: 3.65 | Acc: 30.4 ; threshold 0.100
+Test, epoch: 20; Loss: 3.86 | Acc: 27.6 @1 48.0 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (27.608).
+saving...
+Train, epoch: 21; Loss: 3.63 | Acc: 30.5 ; threshold 0.100
+Test, epoch: 21; Loss: 3.86 | Acc: 27.8 @1 48.2 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (27.81).
+saving...
+Train, epoch: 22; Loss: 3.62 | Acc: 30.7 ; threshold 0.100
+Test, epoch: 22; Loss: 3.87 | Acc: 27.6 @1 48.1 @5 ; threshold 0.100
+non_zero groups 512
+saving...
+Train, epoch: 23; Loss: 3.61 | Acc: 30.8 ; threshold 0.100
+Test, epoch: 23; Loss: 3.86 | Acc: 27.4 @1 48.2 @5 ; threshold 0.100
+non_zero groups 512
+saving...
+Train, epoch: 24; Loss: 3.60 | Acc: 31.0 ; threshold 0.100
+Test, epoch: 24; Loss: 3.87 | Acc: 27.6 @1 47.9 @5 ; threshold 0.100
+non_zero groups 512
+saving...
+Train, epoch: 25; Loss: 3.60 | Acc: 31.0 ; threshold 0.100
+Test, epoch: 25; Loss: 3.84 | Acc: 27.9 @1 48.2 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (27.894).
+saving...
+Train, epoch: 26; Loss: 3.59 | Acc: 31.1 ; threshold 0.100
+Test, epoch: 26; Loss: 3.84 | Acc: 27.8 @1 48.2 @5 ; threshold 0.100
+non_zero groups 512
+saving...
+Train, epoch: 27; Loss: 3.58 | Acc: 31.3 ; threshold 0.100
+Test, epoch: 27; Loss: 3.84 | Acc: 28.0 @1 48.5 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (27.968).
+saving...
+Train, epoch: 28; Loss: 3.57 | Acc: 31.4 ; threshold 0.100
+Test, epoch: 28; Loss: 3.85 | Acc: 27.8 @1 48.4 @5 ; threshold 0.100
+non_zero groups 512
+saving...
+Train, epoch: 29; Loss: 3.57 | Acc: 31.5 ; threshold 0.100
+Test, epoch: 29; Loss: 3.84 | Acc: 28.0 @1 48.3 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (27.988).
+saving...
+Train, epoch: 30; Loss: 3.56 | Acc: 31.5 ; threshold 0.100
+Test, epoch: 30; Loss: 3.83 | Acc: 28.1 @1 48.5 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (28.108).
+saving...
+Train, epoch: 31; Loss: 3.55 | Acc: 31.7 ; threshold 0.100
+Test, epoch: 31; Loss: 3.83 | Acc: 28.0 @1 48.6 @5 ; threshold 0.100
+non_zero groups 512
+saving...
+Train, epoch: 32; Loss: 3.55 | Acc: 31.8 ; threshold 0.100
+Test, epoch: 32; Loss: 3.84 | Acc: 27.9 @1 48.6 @5 ; threshold 0.100
+non_zero groups 512
+saving...
+slurmstepd: error: *** JOB 523667 ON workergpu27 CANCELLED AT 2020-03-26T13:41:15 ***

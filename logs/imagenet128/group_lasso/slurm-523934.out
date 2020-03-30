@@ -1,0 +1,22 @@
+stty: standard input: Inappropriate ioctl for device
+simple_logistic.py
+arguments
+Namespace(batch_norm=True, batchsize=256, batchsize_net=0, bias=0.1, bottleneck_dim=256, channel_pca=0, compute_nflops=False, compute_patch_gram_matrix=False, compute_sparsity=False, convolutional_classifier=6, convolutional_loss=False, correct_padding=False, dataset='imagenet128', force_recompute=False, lambda_1=10.0, learn_patches=False, lr_schedule='{0:1e-4,60:1e-5,80:1e-6,90:1e-7}', multigpu=False, n_bagging_patches=0, n_channel_convolution=512, n_channel_convolution_scale_1=0, nepochs=100, no_cudnn=False, no_jit=False, no_padding=False, no_progress_bar=True, no_zca=False, num_workers=4, numpy_seed=0, optimizer='Adam', padding_mode='reflect', patch_distribution='empirical', patches_file='', path_test='/mnt/home/fguth/datasets/imagenet128/out_data_val', path_train='/mnt/home/fguth/datasets/imagenet128/out_data_train', positive_shrink=False, resume='', save_best_model=False, save_model=True, separable_convolution=False, sgd_momentum=0.0, shrink='heaviside', spatialsize_avg_pooling=20, spatialsize_convolution=24, stride_avg_pooling=12, stride_convolution=1, topk_fraction=0.25, torch_seed=0, weight_decay=0.0, zca_bias=0.001)
+device: cuda
+Net output size: out1 torch.Size([512, 9, 9]) out2 torch.Size([512, 9, 9])
+Parameters shape [torch.Size([512]), torch.Size([512]), torch.Size([512]), torch.Size([512]), torch.Size([1000, 256, 6, 6]), torch.Size([1000]), torch.Size([256, 512, 1, 1]), torch.Size([256]), torch.Size([256, 512, 1, 1]), torch.Size([256])]
+N parameters : 9.481704 millions
+optimizing net execution with torch.jit
+Model will be saved at file checkpoints/imagenet128_512patches_24x24/Adam_{0:1e-4,60:1e-5,80:1e-6,90:1e-7}/28a6f15809c604051be08fb8a9f6086b.pth.tar.
+new lr:0.0001
+Train, epoch: 0; Loss: 6.29 | Acc: 7.3 ; threshold 0.100
+Test, epoch: 0; Loss: 5.28 | Acc: 9.9 @1 23.1 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (9.872).
+saving...
+Train, epoch: 1; Loss: 5.54 | Acc: 10.4 ; threshold 0.100
+Test, epoch: 1; Loss: 5.09 | Acc: 11.6 @1 26.4 @5 ; threshold 0.100
+non_zero groups 512
+Best acc (11.6).
+saving...
+slurmstepd: error: *** JOB 523934 ON workergpu33 CANCELLED AT 2020-03-26T14:22:18 ***
