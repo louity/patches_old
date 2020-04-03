@@ -17,7 +17,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 from imagenet import Imagenet32
-from utils import progress_bar, grab_patches, normalize_patches, compute_channel_PCA, grab_patches_2, update_batch_norms, update_classifiers, grab_patches_from_loader, correct_topk
+from utils import progress_bar, grab_patches, normalize_patches, grab_patches_2, update_batch_norms, update_classifiers, grab_patches_from_loader, correct_topk
 
 print('simple_logistic.py')
 parser = argparse.ArgumentParser('simple logistic regression with convolutional random features model')
@@ -53,6 +53,8 @@ parser.add_argument('--n_bagging_patches', type=int, default=0, help='do model b
 parser.add_argument('--convolutional_classifier', type=int, default=0, help='size of the convolution for convolutional classifier')
 parser.add_argument('--convolutional_loss', action='store_true', help='use convolutional loss')
 parser.add_argument('--lambda_1', default=0., type=float, help='group lasso penalty on the conv')
+parser.add_argument('--block_dropout', default=0, type=int, help='perform block dropout')
+parser.add_argument('--multi_classif', action='store_true')
 
 # parameters of the optimizer
 parser.add_argument('--batchsize', type=int, default=512)
@@ -81,14 +83,17 @@ parser.add_argument('--resume', default='', help='filepath of checkpoint to load
 
 # logs
 parser.add_argument('--no_progress_bar', action='store_true', help="Don't plot progress basr (for FI)")
-parser.add_argument('--compute_sparsity', action='store_true', help="compute sparsity of the data in the weights over the dataset")
-parser.add_argument('--compute_patch_gram_matrix', action='store_true', help="compute sparsity of the data in the weights over the dataset")
-parser.add_argument('--compute_nflops', action='store_true', help="compute number of flops")
 
 args = parser.parse_args()
 
+if args.multi_classif:
+    assert args.batchsize_net > 0, 'batchsize_net must be positive for multiclass classification'
+
 if args.batchsize_net > 0:
     assert args.n_channel_convolution // args.batchsize_net == args.n_channel_convolution / args.batchsize_net, 'batchsize_net must divide n_channel_convolution'
+if args.block_dropout > 0:
+    assert args.n_channel_convolution // args.block_dropout == args.n_channel_convolution / args.block_dropout, 'block_dropout must divide n_channel_convolution'
+
 print('arguments')
 print(args)
 
@@ -267,9 +272,17 @@ if n_channel_convolution_scale_1 > 0 :
         kernel_convolution_1 = torch.load(default_patches_file)
 
 
-def compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, train=True):
+def compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, train=True):
     if args.batch_norm:
         outputs1, outputs2 = batch_norm1(outputs1), batch_norm2(outputs2)
+
+    if args.block_dropout > 0 and train:
+        with torch.no_grad():
+            n = np.random.randint(args.n_channel_convolution // args.block_dropout)
+            dropout_mask.fill_(0)
+            dropout_mask[0,n*args.block_dropout:(n+1)*args.block_dropout, 0, 0] = 1.
+        outputs1 *= dropout_mask
+        outputs2 *= dropout_mask
 
     if args.convolutional_classifier == 0:
         outputs1, outputs2 = outputs1.view(outputs1.size(0),-1), outputs2.view(outputs2.size(0),-1)
@@ -295,12 +308,15 @@ def compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, b
     return outputs, targets
 
 def create_classifier_blocks(out1, out2, args, params, n_classes):
-    batch_norm1, batch_norm2, classifier1, classifier2, classifier =  None, None, None, None, None
+    batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask =  None, None, None, None, None, None
 
     if args.batch_norm:
         batch_norm1 = nn.BatchNorm2d(out1.size(1)).to(device).float()
         batch_norm2 = nn.BatchNorm2d(out2.size(1)).to(device).float()
         params += list(batch_norm1.parameters()) + list(batch_norm2.parameters())
+
+    if args.block_dropout > 0:
+        dropout_mask = torch.FloatTensor(1, out1.size(1), 1, 1).fill_(0).to(device)
 
     if args.convolutional_classifier > 0:
         if args.separable_convolution:
@@ -327,8 +343,11 @@ def create_classifier_blocks(out1, out2, args, params, n_classes):
                 # less params
                 classifier = nn.Conv2d(args.bottleneck_dim, n_classes, args.convolutional_classifier).to(device).float()
                 params += list(classifier.parameters())
-                classifier1 = nn.Conv2d(out1.size(1), args.bottleneck_dim, 1).to(device).float()
-                classifier2 = nn.Conv2d(out2.size(1), args.bottleneck_dim, 1).to(device).float()
+                # classifier1 = nn.Conv2d(out1.size(1), args.bottleneck_dim, 1).to(device).float()
+                # classifier2 = nn.Conv2d(out2.size(1), args.bottleneck_dim, 1).to(device).float()
+                print('no bias in classifiers 1 and 2')
+                classifier1 = nn.Conv2d(out1.size(1), args.bottleneck_dim, 1, bias=False).to(device).float()
+                classifier2 = nn.Conv2d(out2.size(1), args.bottleneck_dim, 1, bias=False).to(device).float()
             else:
                 classifier1 = nn.Conv2d(out1.size(1), n_classes, args.convolutional_classifier).to(device).float()
                 classifier2 = nn.Conv2d(out2.size(1), n_classes, args.convolutional_classifier).to(device).float()
@@ -345,7 +364,7 @@ def create_classifier_blocks(out1, out2, args, params, n_classes):
 
     params += list(classifier1.parameters()) + list(classifier2.parameters())
 
-    return batch_norm1, batch_norm2, classifier1, classifier2, classifier
+    return batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask
 
 def heaviside_half(x, bias):
     return (x > bias).half() - (x < -bias).half()
@@ -442,11 +461,20 @@ else:
     cudnn.benchmark = True
 
 
-out1, out2 = net(x, kernel_convolution)
+if args.multi_classif:
+    kernel_convolution_ = kernel_convolution[:args.batchsize_net]
+else:
+    kernel_convolution_ = kernel_convolution
+
+out1, out2 = net(x, kernel_convolution_)
 out1, out2 = out1.float(), out2.float()
 print(f'Net output size: out1 {out1.shape[-3:]} out2 {out2.shape[-3:]}')
 
-batch_norm1, batch_norm2, classifier1, classifier2, classifier = create_classifier_blocks(out1, out2, args, params, n_classes)
+if args.multi_classif:
+    classifier_blocks = [create_classifier_blocks(out1, out2, args, params, n_classes) for i in range(n_channel_convolution // args.batchsize_net)]
+else:
+    classifier_blocks = create_classifier_blocks(out1, out2, args, params, n_classes)
+
 
 if n_channel_convolution_scale_1 > 0:
     net_1 = Net(spatialsize_avg_pooling, stride_avg_pooling-1, bias=args.bias).to(device)
@@ -461,7 +489,7 @@ if n_channel_convolution_scale_1 > 0:
     out1_1, out2_1 = out1_1.float(), out2_1.float()
 
     print(f'Net scale 1 output size: out1 {out1_1.shape[-3:]} out2 {out2_1.shape[-3:]}')
-    batch_norm1_1, batch_norm2_1, classifier1_1, classifier2_1, classifier_1 = create_classifier_blocks(out1_1, out2_1, args, params, n_classes)
+    batch_norm1_1, batch_norm2_1, classifier1_1, classifier2_1, classifier_1, dropout_mask_1 = create_classifier_blocks(out1_1, out2_1, args, params, n_classes)
 
 
 print(f'Parameters shape {[param.shape for param in params]}')
@@ -471,12 +499,12 @@ print(f'N parameters : {sum([np.prod(list(param.shape)) for param in params])/1e
 del x, out1, out2
 
 
-if args.batch_norm:
-    batch_norm1.eval()
-    batch_norm2.eval()
-    if n_channel_convolution_scale_1 > 0:
-        batch_norm1_1.eval()
-        batch_norm2_1.eval()
+# if args.batch_norm:
+    # batch_norm1.eval()
+    # batch_norm2.eval()
+    # if n_channel_convolution_scale_1 > 0:
+        # batch_norm1_1.eval()
+        # batch_norm2_1.eval()
 
 if args.batchsize_net > 0:
     kernel_convolution = [kernel_convolution[i*args.batchsize_net:(i+1)*args.batchsize_net] for i in range(args.n_channel_convolution // args.batchsize_net)]
@@ -512,16 +540,19 @@ def train(epoch):
     net.train()
     if n_channel_convolution_scale_1 > 0:
         net_1.train()
-    if args.batch_norm:
-        batch_norm1.train()
-        batch_norm2.train()
-        if n_channel_convolution_scale_1 > 0:
-            batch_norm1_1.train()
-            batch_norm2_1.train()
+    if not args.multi_classif:
+        batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask = classifier_blocks
+        if args.batch_norm:
+            batch_norm1.train()
+            batch_norm2.train()
+            if n_channel_convolution_scale_1 > 0:
+                batch_norm1_1.train()
+                batch_norm2_1.train()
 
     train_loss = 0
     total=0
     correct=0
+
 
     for batch_idx, (inputs, targets) in enumerate(trainloader):
         inputs, targets = inputs.to(device), targets.to(device)
@@ -529,14 +560,22 @@ def train(epoch):
             if torch.cuda.is_available():
                 inputs = inputs.half()
             if len(kernel_convolution) > 1:
-                outputs = []
-                for i in range(len(kernel_convolution)):
-                    outputs.append(net(inputs, kernel_convolution[i]))
-                outputs1 = torch.cat([out[0] for out in outputs], dim=1)
-                outputs2 = torch.cat([out[1] for out in outputs], dim=1)
-                del outputs
+                if args.multi_classif:
+                    i = np.random.randint(len(kernel_convolution))
+                    batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask = classifier_blocks[i]
+                    if args.batch_norm:
+                        batch_norm1.train(), batch_norm2.train()
+                        outputs1, outputs2 = net(inputs, kernel_convolution[i])
+                else:
+                    outputs = []
+                    for i in range(len(kernel_convolution)):
+                        outputs.append(net(inputs, kernel_convolution[i]))
+                    outputs1 = torch.cat([out[0] for out in outputs], dim=1)
+                    outputs2 = torch.cat([out[1] for out in outputs], dim=1)
+                    del outputs
             else:
                 outputs1, outputs2 = net(inputs, kernel_convolution[0])
+
 
             outputs1 = outputs1.float()
             outputs2 = outputs2.float()
@@ -548,10 +587,10 @@ def train(epoch):
 
         optimizer.zero_grad()
 
-        outputs, targets = compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, train=True)
+        outputs, targets = compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, train=True)
 
         if n_channel_convolution_scale_1 > 0:
-            outputs_1, _ = compute_classifier_outputs(outputs1_1, outputs2_1, targets, args, batch_norm1_1, batch_norm2_1, classifier1_1, classifier2_1, classifier_1, train=True)
+            outputs_1, _ = compute_classifier_outputs(outputs1_1, outputs2_1, targets, args, batch_norm1_1, batch_norm2_1, classifier1_1, classifier2_1, classifier_1, dropout_mask_1, train=True)
             outputs += outputs_1
 
         loss = criterion(outputs, targets)
@@ -585,12 +624,14 @@ def test(epoch, loader=testloader, msg='Test'):
     net.eval()
     if n_channel_convolution_scale_1 > 0:
         net_1.eval()
-    if args.batch_norm:
-        batch_norm1.eval()
-        batch_norm2.eval()
-        if n_channel_convolution_scale_1 > 0:
-            batch_norm1_1.eval()
-            batch_norm2_1.eval()
+    if not args.multi_classif:
+        batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask = classifier_blocks
+        if args.batch_norm:
+            batch_norm1.eval()
+            batch_norm2.eval()
+            if n_channel_convolution_scale_1 > 0:
+                batch_norm1_1.eval()
+                batch_norm2_1.eval()
 
     test_loss = 0
     correct_top1, correct_top5 = 0, 0
@@ -605,24 +646,33 @@ def test(epoch, loader=testloader, msg='Test'):
                 outputs = []
                 for i in range(len(kernel_convolution)):
                     outputs.append(net(inputs, kernel_convolution[i]))
-                outputs1 = torch.cat([out[0] for out in outputs], dim=1)
-                outputs2 = torch.cat([out[1] for out in outputs], dim=1)
-                del outputs
+                if args.multi_classif:
+                    outs = 0
+                    for i in range(len(kernel_convolution)):
+                        batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask = classifier_blocks[i]
+                        batch_norm1.eval(), batch_norm2.eval()
+                        outs += compute_classifier_outputs(outputs[i][0].float(), outputs[i][1].float(), targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, train=False)[0]
+                    outputs = outs
+                else:
+                    outputs1 = torch.cat([out[0] for out in outputs], dim=1)
+                    outputs2 = torch.cat([out[1] for out in outputs], dim=1)
+                    del outputs
             else:
                 outputs1, outputs2 = net(inputs, kernel_convolution[0])
-            outputs1 = outputs1.float()
-            outputs2 = outputs2.float()
+            if not args.multi_classif:
+                outputs1 = outputs1.float()
+                outputs2 = outputs2.float()
 
-            if n_channel_convolution_scale_1 > 0:
-                outputs1_1, outputs2_1 = net_1(inputs, kernel_convolution_1)
-                outputs1_1 = outputs1_1.float()
-                outputs2_1 = outputs2_1.float()
+                if n_channel_convolution_scale_1 > 0:
+                    outputs1_1, outputs2_1 = net_1(inputs, kernel_convolution_1)
+                    outputs1_1 = outputs1_1.float()
+                    outputs2_1 = outputs2_1.float()
 
-            outputs, targets = compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, train=False)
+                outputs, targets = compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, train=False)
 
-            if n_channel_convolution_scale_1 > 0:
-                outputs_1, _ = compute_classifier_outputs(outputs1_1, outputs2_1, targets, args, batch_norm1_1, batch_norm2_1, classifier1_1, classifier2_1, classifier_1, train=False)
-                outputs += outputs_1
+                if n_channel_convolution_scale_1 > 0:
+                    outputs_1, _ = compute_classifier_outputs(outputs1_1, outputs2_1, targets, args, batch_norm1_1, batch_norm2_1, classifier1_1, classifier2_1, classifier_1, dropout_mask_1, train=False)
+                    outputs += outputs_1
 
             loss = criterion(outputs, targets)
 
