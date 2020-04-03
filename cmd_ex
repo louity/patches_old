@@ -1,0 +1,4 @@
+# imagenet 128
+python simple_logistic.py --num_workers 4 --n_channel_convolution 4096 --batchsize_net 512 --spatialsize_convolution 24 --stride_convolution 1 --stride_avg_pooling 12 --spatialsize_avg_pooling 20 --dataset imagenet128 --bias 0.1 --batchsize 256 --lr "{0:1e-4,60:1e-5,80:1e-6,90:1e-7}" --nepochs 100 --path_train <COMPLETE> --path_test <COMPLETE> --no_progress_bar --optimizer Adam --convolutional_classifier 6 --bottleneck_dim 256 --batch_norm --padding_mode reflect --shrink heaviside
+# cifar10
+python simple_logistic.py --num_workers 10 --n_channel_convolution 32768 --batchsize_net 16384 --batchsize 128 --dataset cifar10 --stride_avg_pooling 3 --spatialsize_avg_pooling 5 --bias 0.14 --lr "{0:1e-4,100:1e-5,150:1e-6,200:1e-7}" --nepochs 225 --no_progress_bar --optimizer Adam --bottleneck_dim 128 --padding_mode reflect --shrink heaviside --convolutional_classifier 6 --lambda_1 0.001 --batch_norm
