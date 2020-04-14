@@ -372,4 +372,99 @@ def correct_topk(output, target, topk=(1,)):
             res.append(correct_k)
     return res
 
+def preprocess(train, test, min_divisor=1e-8, zca_bias=0.0001, return_weights=False):
+    print('init min max', train.min(), train.max())
+    origTrainShape = train.shape
+    origTestShape = test.shape
 
+    train = np.ascontiguousarray(train, dtype=np.float32).reshape(train.shape[0], -1).astype('float64')
+    test = np.ascontiguousarray(test, dtype=np.float32).reshape(test.shape[0], -1).astype('float64')
+    print('float conv min max', train.min(), train.max())
+
+    nTrain = train.shape[0]
+
+    # Zero mean every feature
+    train = train - np.mean(train, axis=1)[:,np.newaxis]
+    test = test - np.mean(test, axis=1)[:,np.newaxis]
+
+    # Normalize
+    train_norms = np.linalg.norm(train, axis=1)
+    test_norms = np.linalg.norm(test, axis=1)
+
+    # Make features unit norm
+    train = train/train_norms[:,np.newaxis]
+    test = test/test_norms[:,np.newaxis]
+
+    # # data_means = np.mean(train, axis=1)
+
+    train = train - np.mean(train, axis=0, keepdims=True)
+    test = test - np.mean(test, axis=0, keepdims=True)
+
+
+    trainCovMat = 1.0/nTrain * train.T.dot(train)
+
+    (E,V) = np.linalg.eig(trainCovMat)
+
+    E += zca_bias
+    sqrt_zca_eigs = np.sqrt(E)
+    inv_sqrt_zca_eigs = np.diag(np.power(sqrt_zca_eigs, -1))
+    global_ZCA = V.dot(inv_sqrt_zca_eigs).dot(V.T)
+
+    print('normalized min max', train.min(), train.max())
+    train = (train).dot(global_ZCA)
+    test = (test).dot(global_ZCA)
+    print('zca min max', train.min(), train.max())
+
+    train = (train - train.min()) * 255. / (train.max() - train.min())
+    test = (test - test.min()) * 255. / (test.max() - test.min())
+    print('renorm min max', train.min(), train.max())
+    train = train.astype('uint8')
+    test = test.astype('uint8')
+    print('uint8 min max', train.min(), train.max())
+    if return_weights:
+        return (train.reshape(origTrainShape), test.reshape(origTestShape)), global_ZCA
+    else:
+        return (train.reshape(origTrainShape), test.reshape(origTestShape))
+
+
+def normalize_patches_2(patches, min_divisor=1e-8, zca_bias=0.001, mean_rgb=np.array([0,0,0]), zca_whitening=True):
+    if (patches.dtype == 'uint8'):
+        patches = patches.astype('float64')
+        patches /= 255.0
+    print("zca bias", zca_bias)
+    n_patches = patches.shape[0]
+    orig_shape = patches.shape
+    patches = patches.reshape(patches.shape[0], -1)
+
+    # Zero mean every feature
+    patches = patches - np.mean(patches, axis=1)[:,np.newaxis]
+
+    # Added by Louis : Statistical zero mean for ZCA
+    patches = patches - np.mean(patches, axis=0, keepdims=True)
+
+    # Normalize
+    patch_norms = np.linalg.norm(patches, axis=1)
+
+    # Get rid of really small norms
+    #patch_norms[np.where(patch_norms < min_divisor)] = 1
+
+    # Make features unit norm
+    #patches = patches/patch_norms[:,np.newaxis]
+
+    if zca_whitening:
+        patchesCovMat = 1.0/n_patches * patches.T.dot(patches)
+
+        (E,V) = np.linalg.eig(patchesCovMat)
+
+        E += zca_bias
+        sqrt_zca_eigs = np.sqrt(E)
+        inv_sqrt_zca_eigs = np.diag(np.power(sqrt_zca_eigs, -1))
+        global_ZCA = V.dot(inv_sqrt_zca_eigs).dot(V.T)
+        patches_normalized = (patches).dot(global_ZCA).dot(global_ZCA.T)
+    else:
+        patches_normalized = patches
+
+    # unit norm to patches
+    patches_normalized /= np.linalg.norm(patches_normalized, axis=1, keepdims=True) + min_divisor
+
+    return patches_normalized.reshape(orig_shape).astype('float32'), patches.reshape(orig_shape).astype('float32'), E.astype('float32'), V.astype('float32')
