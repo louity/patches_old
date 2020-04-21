@@ -3,6 +3,7 @@ import concurrent.futures as fs
 from numba import jit
 import time, sys, os
 import torch
+import scipy
 
 if torch.cuda.is_available():
     device = 'cuda'
@@ -128,7 +129,7 @@ def normalize_patches(patches, min_divisor=1e-8, zca_bias=0.001, mean_rgb=np.arr
     patches = patches.reshape(patches.shape[0], -1)
 
     # Zero mean every feature
-    patches = patches - np.mean(patches, axis=1)[:,np.newaxis]
+    # patches = patches - np.mean(patches, axis=1)[:,np.newaxis]
 
     # Added by Louis : Statistical zero mean for ZCA
     patches = patches - np.mean(patches, axis=0, keepdims=True)
@@ -146,6 +147,9 @@ def normalize_patches(patches, min_divisor=1e-8, zca_bias=0.001, mean_rgb=np.arr
         patchesCovMat = 1.0/n_patches * patches.T.dot(patches)
 
         (E,V) = np.linalg.eig(patchesCovMat)
+        print(E)
+        (E, V) = scipy.linalg.eigh(patchesCovMat)
+        print(E)
 
         E += zca_bias
         sqrt_zca_eigs = np.sqrt(E)
@@ -436,8 +440,8 @@ def normalize_patches_2(patches, min_divisor=1e-8, zca_bias=0.001, mean_rgb=np.a
     orig_shape = patches.shape
     patches = patches.reshape(patches.shape[0], -1)
 
-    # Zero mean every feature
-    patches = patches - np.mean(patches, axis=1)[:,np.newaxis]
+    # # Zero mean every feature
+    # patches = patches - np.mean(patches, axis=1)[:,np.newaxis]
 
     # Added by Louis : Statistical zero mean for ZCA
     patches = patches - np.mean(patches, axis=0, keepdims=True)
