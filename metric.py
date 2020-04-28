@@ -205,11 +205,7 @@ def compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, b
         outputs = batch_norm_bottleneck(outputs)
 
     if args.convolutional_classifier > 0:
-        if args.convolutional_loss and train:
-            b_size, nc1, h, w = outputs.size()
-            outputs = outputs.view(b_size, nc1, -1).transpose(1,2).reshape(b_size*h*w, nc1)
-            targets = targets.view(b_size, 1).expand(b_size, h*w).reshape(b_size*h*w)
-        elif args.separable_convolution or args.bottleneck_dim > 0:
+        if args.separable_convolution or args.bottleneck_dim > 0:
             outputs = classifier(outputs)
             outputs = F.adaptive_avg_pool2d(outputs, 1)
         else:
