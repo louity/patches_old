@@ -307,7 +307,7 @@ class Net(nn.Module):
     def forward(self, x, conv_weight):
         # out = F.conv2d(x, conv_weight)
         out = F.unfold(x, self.conv_size)
-        out = out.view(out.size(0), out.size(1), int(np.sqrt(out.size(2))), int(np.sqrt(out.size(3))))
+        out = out.view(out.size(0), out.size(1), int(np.sqrt(out.size(2))), int(np.sqrt(out.size(2))))
         out = F.conv2d(out, conv_weight)
 
         out = shrink(out, self.bias)
