@@ -9,6 +9,7 @@ import time
 import torchvision.datasets as datasets
 from torchvision.datasets import CIFAR10
 import torchvision.transforms as transforms
+import torchcontrib
 
 import torch
 import torch.backends.cudnn as cudnn
@@ -17,7 +18,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 from imagenet import Imagenet32
-from utils import progress_bar, grab_patches, normalize_patches, grab_patches_2, update_batch_norms, update_classifiers, grab_patches_from_loader, correct_topk
+from utils import progress_bar, grab_patches, normalize_patches, grab_patches_2, update_batch_norms, update_classifiers, grab_patches_from_loader, correct_topk, preprocess
 
 print('simple_logistic.py')
 parser = argparse.ArgumentParser('simple logistic regression with convolutional random features model')
@@ -35,6 +36,7 @@ parser.add_argument('--patch_distribution', default='empirical', choices=['empir
 parser.add_argument('--channel_pca', type=int, default=0, help='perform PCA along channels')
 parser.add_argument('--no_zca', action='store_true', help='no zca whitening performed on the patches')
 parser.add_argument('--zca_bias', default=0.001, type=float, help='regularization bias for zca whitening')
+parser.add_argument('--whiten_dataset', action='store_true', help='no zca whitening performed on the patches')
 
 # parameters for the extraction
 parser.add_argument('--stride_convolution', default=1, type=int)
@@ -48,6 +50,7 @@ parser.add_argument('--positive_shrink', action='store_true', help='use positive
 # parameters of the classifier
 parser.add_argument('--batch_norm', action='store_true', help='add batchnorm before classifier')
 parser.add_argument('--bottleneck_dim', default=0, type=int, help='bottleneck dimension for the classifier')
+parser.add_argument('--batch_norm_bottleneck', action='store_true', help='add batchnorm in bottleneck')
 parser.add_argument('--separable_convolution', action='store_true', help='makes the classifier convolution separable in channels and space')
 parser.add_argument('--n_bagging_patches', type=int, default=0, help='do model bagging in the patches dimension')
 parser.add_argument('--convolutional_classifier', type=int, default=0, help='size of the convolution for convolutional classifier')
@@ -74,7 +77,7 @@ parser.add_argument('--no_cudnn', action='store_true', help='disable cuDNN to pr
 parser.add_argument('--no_jit', action='store_true', help='disable torch.jit optimization to prevent error (slower)')
 
 # reproducibility parameters
-parser.add_argument('--force_recompute', type=bool, default=False)
+parser.add_argument('--force_recompute', action='store_true')
 parser.add_argument('--numpy_seed', type=int, default=0)
 parser.add_argument('--torch_seed', type=int, default=0)
 parser.add_argument('--save_model', action='store_true', help='saves the model')
@@ -186,13 +189,13 @@ elif args.dataset in ['imagenet32', 'imagenet64', 'imagenet128']:
         transforms_test = [transforms.ToTensor(), normalize]
 
     trainset = Imagenet32(args.path_train, transform=transforms.Compose(transforms_train), sz=spatial_size, n_arrays=n_arrays_train)
-    valset = Imagenet32(args.path_test, transform=transforms.Compose(transforms_test), sz=spatial_size)
+    testset = Imagenet32(args.path_test, transform=transforms.Compose(transforms_test), sz=spatial_size)
 
     trainloader = torch.utils.data.DataLoader(
         trainset, batch_size=args.batchsize, shuffle=True,
         num_workers=args.num_workers, pin_memory=True)
     testloader = torch.utils.data.DataLoader(
-        valset,
+        testset,
         batch_size=args.batchsize, shuffle=False,
         num_workers=args.num_workers, pin_memory=True)
     n_classes = 1000
@@ -202,6 +205,11 @@ zca_str = 'nozca' if args.no_zca else f'zcabias{args.zca_bias}'
 default_patches_file = f'patches/{args.dataset}_seed{args.numpy_seed}_n{args.n_channel_convolution}_size{args.spatialsize_convolution}_{zca_str}_filter.t7'
 patches_file = args.patches_file if args.patches_file else default_patches_file
 
+if args.whiten_dataset:
+    # Whitening of sets
+    train_whiten, test_whiten = preprocess(trainset.data, testset.data)
+    trainset.data = train_whiten
+    testset.data = test_whiten
 
 if args.patch_distribution == 'empirical':
     if not os.path.exists(patches_file) or args.force_recompute:
@@ -271,8 +279,7 @@ if n_channel_convolution_scale_1 > 0 :
     else:
         kernel_convolution_1 = torch.load(default_patches_file)
 
-
-def compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, train=True):
+def compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, batch_norm_bottleneck, train=True):
     if args.batch_norm:
         outputs1, outputs2 = batch_norm1(outputs1), batch_norm2(outputs2)
 
@@ -289,6 +296,9 @@ def compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, b
 
     outputs1, outputs2 = classifier1(outputs1), classifier2(outputs2)
     outputs = outputs1 + outputs2
+
+    if args.batch_norm_bottleneck:
+        outputs = batch_norm_bottleneck(outputs)
 
     if args.convolutional_classifier > 0:
         if args.convolutional_loss and train:
@@ -308,12 +318,16 @@ def compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, b
     return outputs, targets
 
 def create_classifier_blocks(out1, out2, args, params, n_classes):
-    batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask =  None, None, None, None, None, None
+    batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, batch_norm_bottleneck =  None, None, None, None, None, None, None
 
     if args.batch_norm:
         batch_norm1 = nn.BatchNorm2d(out1.size(1)).to(device).float()
         batch_norm2 = nn.BatchNorm2d(out2.size(1)).to(device).float()
         params += list(batch_norm1.parameters()) + list(batch_norm2.parameters())
+
+    if args.batch_norm_bottleneck:
+        batch_norm_bottleneck = nn.BatchNorm2d(args.bottleneck_dim).to(device).float()
+        params += list(batch_norm_bottleneck.parameters())
 
     if args.block_dropout > 0:
         dropout_mask = torch.FloatTensor(1, out1.size(1), 1, 1).fill_(0).to(device)
@@ -364,7 +378,7 @@ def create_classifier_blocks(out1, out2, args, params, n_classes):
 
     params += list(classifier1.parameters()) + list(classifier2.parameters())
 
-    return batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask
+    return batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, batch_norm_bottleneck
 
 def heaviside_half(x, bias):
     return (x > bias).half() - (x < -bias).half()
@@ -489,7 +503,7 @@ if n_channel_convolution_scale_1 > 0:
     out1_1, out2_1 = out1_1.float(), out2_1.float()
 
     print(f'Net scale 1 output size: out1 {out1_1.shape[-3:]} out2 {out2_1.shape[-3:]}')
-    batch_norm1_1, batch_norm2_1, classifier1_1, classifier2_1, classifier_1, dropout_mask_1 = create_classifier_blocks(out1_1, out2_1, args, params, n_classes)
+    batch_norm1_1, batch_norm2_1, classifier1_1, classifier2_1, classifier_1, dropout_mask_1, batch_norm_bottleneck = create_classifier_blocks(out1_1, out2_1, args, params, n_classes)
 
 
 print(f'Parameters shape {[param.shape for param in params]}')
@@ -535,19 +549,24 @@ if args.multigpu and n_gpus > 1:
     print(f'{n_gpus} available, using Dataparralel for net')
     net = nn.DataParallel(net)
 
+batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, batch_norm_bottleneck = classifier_blocks
+batch_norm1.eval()
+batch_norm2.eval()
 
 def train(epoch):
     net.train()
     if n_channel_convolution_scale_1 > 0:
         net_1.train()
     if not args.multi_classif:
-        batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask = classifier_blocks
+        batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, batch_norm_bottleneck = classifier_blocks
         if args.batch_norm:
             batch_norm1.train()
             batch_norm2.train()
             if n_channel_convolution_scale_1 > 0:
                 batch_norm1_1.train()
                 batch_norm2_1.train()
+        if args.batch_norm_bottleneck:
+            batch_norm_bottleneck.train()
 
     train_loss = 0
     total=0
@@ -561,11 +580,27 @@ def train(epoch):
                 inputs = inputs.half()
             if len(kernel_convolution) > 1:
                 if args.multi_classif:
-                    i = np.random.randint(len(kernel_convolution))
-                    batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask = classifier_blocks[i]
-                    if args.batch_norm:
-                        batch_norm1.train(), batch_norm2.train()
-                        outputs1, outputs2 = net(inputs, kernel_convolution[i])
+                    with torch.enable_grad():
+                        for i in range(len(kernel_convolution)):
+                            batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, batch_norm_bottleneck = classifier_blocks[i]
+                            if args.batch_norm:
+                                batch_norm1.train(), batch_norm2.train()
+                                outputs1, outputs2 = net(inputs, kernel_convolution[i])
+                            outputs1 = outputs1.float()
+                            outputs2 = outputs2.float()
+                            optimizer.zero_grad()
+
+                            outputs, targets = compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, batch_norm_bottleneck, train=True)
+
+                            loss = criterion(outputs, targets)
+                            if args.lambda_1 > 0.:
+                                group_sparsity_norm = torch.norm(torch.cat([classifier1.weight, classifier2.weight], dim=0), dim=0, p=2).mean()
+                                loss += args.lambda_1 * group_sparsity_norm
+                            loss.backward()
+                            optimizer.step()
+                            train_loss += loss.item() / len(kernel_convolution)
+                        total += 1
+                        continue
                 else:
                     outputs = []
                     for i in range(len(kernel_convolution)):
@@ -587,10 +622,10 @@ def train(epoch):
 
         optimizer.zero_grad()
 
-        outputs, targets = compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, train=True)
+        outputs, targets = compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, batch_norm_bottleneck, train=True)
 
         if n_channel_convolution_scale_1 > 0:
-            outputs_1, _ = compute_classifier_outputs(outputs1_1, outputs2_1, targets, args, batch_norm1_1, batch_norm2_1, classifier1_1, classifier2_1, classifier_1, dropout_mask_1, train=True)
+            outputs_1, _ = compute_classifier_outputs(outputs1_1, outputs2_1, targets, args, batch_norm1_1, batch_norm2_1, classifier1_1, classifier2_1, classifier_1, dropout_mask_1, batch_norm_bottleneck, train=True)
             outputs += outputs_1
 
         loss = criterion(outputs, targets)
@@ -613,6 +648,7 @@ def train(epoch):
 
         progress_bar(batch_idx, len(trainloader), 'Train, epoch: %i; Loss: %.3f | Acc: %.3f%% (%d/%d) ; threshold %.3f' % (
             epoch, train_loss / (batch_idx + 1), 100. * correct / total, correct, total, args.bias), hide=args.no_progress_bar)
+    optimizer.swap_swa_sgd()
 
     if args.no_progress_bar:
         print('Train, epoch: {}; Loss: {:.2f} | Acc: {:.1f} ; threshold {:.3f}'.format(
@@ -625,13 +661,15 @@ def test(epoch, loader=testloader, msg='Test'):
     if n_channel_convolution_scale_1 > 0:
         net_1.eval()
     if not args.multi_classif:
-        batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask = classifier_blocks
+        batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, batch_norm_bottleneck = classifier_blocks
         if args.batch_norm:
             batch_norm1.eval()
             batch_norm2.eval()
             if n_channel_convolution_scale_1 > 0:
                 batch_norm1_1.eval()
                 batch_norm2_1.eval()
+        if args.batch_norm_bottleneck:
+            batch_norm_bottleneck.eval()
 
     test_loss = 0
     correct_top1, correct_top5 = 0, 0
@@ -649,9 +687,9 @@ def test(epoch, loader=testloader, msg='Test'):
                 if args.multi_classif:
                     outs = 0
                     for i in range(len(kernel_convolution)):
-                        batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask = classifier_blocks[i]
+                        batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, batch_norm_bottleneck = classifier_blocks[i]
                         batch_norm1.eval(), batch_norm2.eval()
-                        outs += compute_classifier_outputs(outputs[i][0].float(), outputs[i][1].float(), targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, train=False)[0]
+                        outs += compute_classifier_outputs(outputs[i][0].float(), outputs[i][1].float(), targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, batch_norm_bottleneck, train=False)[0]
                     outputs = outs
                 else:
                     outputs1 = torch.cat([out[0] for out in outputs], dim=1)
@@ -668,10 +706,10 @@ def test(epoch, loader=testloader, msg='Test'):
                     outputs1_1 = outputs1_1.float()
                     outputs2_1 = outputs2_1.float()
 
-                outputs, targets = compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, train=False)
+                outputs, targets = compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, dropout_mask, batch_norm_bottleneck, train=False)
 
                 if n_channel_convolution_scale_1 > 0:
-                    outputs_1, _ = compute_classifier_outputs(outputs1_1, outputs2_1, targets, args, batch_norm1_1, batch_norm2_1, classifier1_1, classifier2_1, classifier_1, dropout_mask_1, train=False)
+                    outputs_1, _ = compute_classifier_outputs(outputs1_1, outputs2_1, targets, args, batch_norm1_1, batch_norm2_1, classifier1_1, classifier2_1, classifier_1, dropout_mask_1, batch_norm_bottleneck, train=False)
                     outputs += outputs_1
 
             loss = criterion(outputs, targets)
@@ -723,13 +761,11 @@ if args.resume:
             optimizer = optim.SGD(params, lr=learning_rates[closest_i], momentum=args.sgd_momentum, weight_decay=args.weight_decay)
         optimizer.load_state_dict(state['optimizer'])
 
-    classifier1.load_state_dict(state['classifier1'])
-    classifier2.load_state_dict(state['classifier2'])
-    if args.bottleneck_dim > 0:
-        classifier.load_state_dict(state['classifier'])
-    if args.batch_norm:
-        batch_norm1.load_state_dict(state['batch_norm1'])
-        batch_norm2.load_state_dict(state['batch_norm2'])
+
+    for block, name in zip(classifier_blocks, ['bn1','bn2','cl1', 'cl2', 'cl', 'bnb']):
+        if name in state and block is not None:
+            block.load_state_dict(state[name])
+
     acc, outputs = test(-1)
 
 start_time = time.time()
@@ -739,8 +775,10 @@ for i in range(start_epoch, args.nepochs):
         print('new lr:'+str(learning_rates[i]))
         if args.optimizer == 'Adam':
             optimizer = optim.Adam(params, lr=learning_rates[i], weight_decay=args.weight_decay)
+            optimizer = torchcontrib.optim.SWA(optimizer, swa_start=10, swa_freq=5)
         elif args.optimizer == 'SGD':
             optimizer = optim.SGD(params, lr=learning_rates[i], momentum=args.sgd_momentum, weight_decay=args.weight_decay)
+            optimizer = torchcontrib.optim.SWA(optimizer, swa_start=10, swa_freq=5)
         else:
             raise NotImplementedError('optimizer {} not implemented'.format(args.optimizer))
     no_nan_in_train_loss = train(i)
@@ -754,25 +792,32 @@ for i in range(start_epoch, args.nepochs):
         best_test_acc = test_acc
         best_epoch = i
 
-    if args.save_model or args.save_best_model and best_epoch == i:
+    if args.save_model :
         print(f'saving...')
         state.update({
             'optimizer': optimizer.state_dict(),
-            'classifier1': classifier1.state_dict(),
-            'classifier2': classifier2.state_dict(),
             'epoch': i,
             'acc': test_acc,
             'outputs': outputs,
         })
-        if args.bottleneck_dim > 0:
+
+        for block, name in zip(classifier_blocks, ['bn1','bn2','cl1', 'cl2', 'cl', 'bnb']):
+            if block is not None:
+                state.update({
+                    name: block.state_dict()
+                })
+
+        if best_epoch == i:
             state.update({
-                'classifier': classifier.state_dict(),
+                'best_epoch': i,
+                'best_acc': test_acc,
+                'best_outputs': outputs,
             })
-        if args.batch_norm:
-            state.update({
-                f'batch_norm1': batch_norm1.state_dict(),
-                f'batch_norm2': batch_norm2.state_dict(),
-            })
+            for block, name in zip(classifier_blocks, ['best_bn1','best_bn2','best_cl1', 'best_cl2', 'best_cl', 'best_bnb']):
+                if block is not None:
+                    state.update({
+                        name: block.state_dict()
+                    })
         torch.save(state, checkpoint_file)
 
 print(f'Best test acc. {best_test_acc}  at epoch {best_epoch}/{i}')
