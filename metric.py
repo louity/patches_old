@@ -272,50 +272,26 @@ def create_classifier_blocks(out1, out2, args, params, n_classes):
 
     return batch_norm1, batch_norm2, classifier1, classifier2, classifier, batch_norm_bottleneck
 
-def heaviside_half(x, bias):
-    return (x > bias).half() - (x < -bias).half()
-
 def heaviside_float(x, bias):
     return (x > bias).float() - (x < -bias).float()
-
-def topk_half(x, k):
-    x_abs = torch.abs(x)
-    return (x_abs >= x_abs.topk(dim=1, k=k).values.min(dim=1, keepdim=True).values).half() * x.half()
 
 def topk_float(x, k):
     x_abs = torch.abs(x)
     return (x_abs >= x_abs.topk(dim=1, k=k).values.min(dim=1, keepdim=True).values).float() * x.float()
 
-def topk_heaviside_half(x, k):
-    x_abs = torch.abs(x)
-    return (x_abs >= x_abs.topk(dim=1, k=k).values.min(dim=1, keepdim=True).values).half() * x.sign().half()
-
 def topk_heaviside_float(x, k):
     x_abs = torch.abs(x)
     return (x_abs >= x_abs.topk(dim=1, k=k).values.min(dim=1, keepdim=True).values).float() * x.sign().float()
-
-def topk_heaviside_and_heaviside_half(x, k, bias=args.bias):
-    x_abs = torch.abs(x)
-    return (x_abs > bias).half() * (x_abs >= x_abs.topk(dim=1, k=k).values.min(dim=1, keepdim=True).values).half() * x.sign().half()
 
 
 if args.shrink == 'heaviside':
     shrink = heaviside_float
 elif args.shrink == 'topk':
     args.bias = int(args.topk_fraction * n_channel_convolution)
-    if args.learn_patches:
-        shrink = topk_float
-    else:
-        shrink = topk_half
+    shrink = topk_float
 elif args.shrink == 'topk_heaviside':
     args.bias = int(args.topk_fraction * n_channel_convolution)
-    if args.learn_patches:
-        shrink = topk_heaviside_float
-    else:
-        shrink = topk_heaviside_half
-elif args.shrink == 'topk_heaviside_and_heaviside':
-    args.bias = int(args.topk_fraction * n_channel_convolution)
-    shrink = topk_heaviside_and_heaviside_half
+    shrink = topk_heaviside_float
 elif args.shrink == 'hardshrink':
     shrink = F.hardshrink
 elif args.shrink == 'softshrink':
@@ -351,10 +327,6 @@ kernel_convolution = kernel_convolution.to(device)
 
 x = torch.rand(1, 3, spatial_size, spatial_size).to(device)
 
-if torch.cuda.is_available():
-    kernel_convolution = kernel_convolution.half()
-    x = x.half()
-
 
 if args.no_cudnn:
     torch.backends.cudnn.enabled = False
@@ -380,7 +352,7 @@ if args.batchsize_net > 0:
 else:
     kernel_convolution = [kernel_convolution]
 
-if torch.cuda.is_available() and not args.learn_patches and not args.no_jit:
+if torch.cuda.is_available() and not args.no_jit:
     print('optimizing net execution with torch.jit')
     trial = torch.rand(args.batchsize//n_gpus, 3, spatial_size, spatial_size).to(device)
 
@@ -412,8 +384,6 @@ def train(epoch):
         inputs, targets = inputs.to(device), targets.to(device)
 
         with torch.no_grad():
-            if torch.cuda.is_available():
-                inputs = inputs.half()
 
             outputs1, outputs2 = net(inputs, kernel_convolution[0])
 
@@ -455,8 +425,6 @@ def test(epoch, loader=testloader, msg='Test'):
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(loader):
             inputs, targets = inputs.to(device), targets.to(device)
-            if torch.cuda.is_available():
-                inputs = inputs.half()
 
             outputs1, outputs2 = net(inputs, kernel_convolution[0])
 
