@@ -180,7 +180,7 @@ if not os.path.exists(patches_file) or args.force_recompute:
         selected_patches = zca_patches[idxs].astype(np.float32)
         print(f'patches randomly selected: {selected_patches.shape}')
 
-        kernel_convolution = torch.from_numpy(selected_patches)
+        kernel_convolution = torch.from_numpy(selected_patches).view(n_channel_convolution, -1, 1, 1)
         print(f'saving patches in file {patches_file}')
         torch.save(kernel_convolution, patches_file)
 else:
@@ -297,14 +297,18 @@ elif args.shrink == 'softshrink':
 
 # Feature extractor
 class Net(nn.Module):
-    def __init__(self, spatialsize_avg_pooling, stride_avg_pooling, bias=1.0):
+    def __init__(self, spatialsize_convolution, spatialsize_avg_pooling, stride_avg_pooling, bias=1.0):
         super(Net, self).__init__()
         self.pool_size = spatialsize_avg_pooling
         self.pool_stride = stride_avg_pooling
         self.bias = bias
+        self.conv_size = spatialsize_convolution
 
     def forward(self, x, conv_weight):
-        out = F.conv2d(x, conv_weight)
+        # out = F.conv2d(x, conv_weight)
+        out = F.unfold(x, self.conv_size)
+        out = F.conv2d(out, conv_weight)
+
         out = shrink(out, self.bias)
         out1 = F.relu(-out, inplace=False) # negative part
         out1 = F.avg_pool2d(out1, [self.pool_size, self.pool_size], stride=[self.pool_stride, self.pool_stride],
@@ -316,7 +320,8 @@ class Net(nn.Module):
 
 criterion = nn.CrossEntropyLoss()
 
-net = Net(spatialsize_avg_pooling, stride_avg_pooling, bias=args.bias).to(device)
+net = Net(spatialsize_convolution, spatialsize_avg_pooling,
+          stride_avg_pooling, bias=args.bias).to(device)
 
 kernel_convolution = kernel_convolution.to(device)
 
