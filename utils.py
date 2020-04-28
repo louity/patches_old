@@ -146,10 +146,7 @@ def normalize_patches(patches, min_divisor=1e-8, zca_bias=0.001, mean_rgb=np.arr
     if zca_whitening:
         patchesCovMat = 1.0/n_patches * patches.T.dot(patches)
 
-        (E,V) = np.linalg.eig(patchesCovMat)
-        print(E)
         (E, V) = scipy.linalg.eigh(patchesCovMat)
-        print(E)
 
         E += zca_bias
         sqrt_zca_eigs = np.sqrt(E)
@@ -431,7 +428,7 @@ def preprocess(train, test, min_divisor=1e-8, zca_bias=0.0001, return_weights=Fa
         return (train.reshape(origTrainShape), test.reshape(origTestShape))
 
 
-def normalize_patches_2(patches, min_divisor=1e-8, zca_bias=0.001, mean_rgb=np.array([0,0,0]), zca_whitening=True):
+def normalize_patches_2(patches, min_divisor=1e-8, zca_bias=0.001, mean_rgb=np.array([0,0,0])):
     if (patches.dtype == 'uint8'):
         patches = patches.astype('float64')
         patches /= 255.0
@@ -440,35 +437,52 @@ def normalize_patches_2(patches, min_divisor=1e-8, zca_bias=0.001, mean_rgb=np.a
     orig_shape = patches.shape
     patches = patches.reshape(patches.shape[0], -1)
 
-    # # Zero mean every feature
-    # patches = patches - np.mean(patches, axis=1)[:,np.newaxis]
-
-    # Added by Louis : Statistical zero mean for ZCA
+    # Retreive mean for ZCA
     patches = patches - np.mean(patches, axis=0, keepdims=True)
 
-    # Normalize
-    patch_norms = np.linalg.norm(patches, axis=1)
+    patchesCovMat = 1.0/n_patches * patches.T.dot(patches)
 
-    # Get rid of really small norms
-    #patch_norms[np.where(patch_norms < min_divisor)] = 1
+    (E, V) = scipy.linalg.eigh(patchesCovMat)
 
-    # Make features unit norm
-    #patches = patches/patch_norms[:,np.newaxis]
+    E += zca_bias
+    sqrt_zca_eigs = np.sqrt(E)
+    inv_sqrt_zca_eigs = np.diag(np.power(sqrt_zca_eigs, -1))
+    global_ZCA = V.dot(inv_sqrt_zca_eigs).dot(V.T)
+    patches_normalized = (patches).dot(global_ZCA).dot(global_ZCA.T)
 
-    if zca_whitening:
-        patchesCovMat = 1.0/n_patches * patches.T.dot(patches)
-
-        (E,V) = np.linalg.eig(patchesCovMat)
-
-        E += zca_bias
-        sqrt_zca_eigs = np.sqrt(E)
-        inv_sqrt_zca_eigs = np.diag(np.power(sqrt_zca_eigs, -1))
-        global_ZCA = V.dot(inv_sqrt_zca_eigs).dot(V.T)
-        patches_normalized = (patches).dot(global_ZCA).dot(global_ZCA.T)
-    else:
-        patches_normalized = patches
-
-    # unit norm to patches
+    # normalize after zca
     patches_normalized /= np.linalg.norm(patches_normalized, axis=1, keepdims=True) + min_divisor
 
     return patches_normalized.reshape(orig_shape).astype('float32'), patches.reshape(orig_shape).astype('float32'), E.astype('float32'), V.astype('float32')
+
+def compute_zca_whitening(patches, min_divisor=1e-8, zca_bias=0.001, ):
+    if (patches.dtype == 'uint8'):
+        patches = patches.astype('float64')
+        patches /= 255.0
+
+    print("zca bias", zca_bias)
+    n_patches = patches.shape[0]
+    orig_shape = patches.shape
+    patches = patches.reshape(patches.shape[0], -1)
+
+    # Retreive the statistical mean
+    patches_mean = np.mean(patches, axis=0, keepdims=True)
+    patches = patches - patches_mean
+
+    covariance_matrix = patches.T.dot(patches) / n_patches
+
+    (eigvals, eigvecs) = scipy.linalg.eigh(covariance_matrix)
+
+    inv_sqrt_zca_eigvals = np.diag(np.power(eigvals + zca_bias, -1/2))
+    ZCA_operator = eigvecs.dot(inv_sqrt_zca_eigvals).dot(eigvecs.T)
+
+    patches_normalized = (patches).dot(ZCA_operator).dot(ZCA_operator.T)
+
+    # Normalize
+    patch_normalized_norms = np.linalg.norm(patches_normalized, axis=1) #EO
+
+    # Get rid of really small norms
+    patch_normalized_norms[np.where(patch_normalized_norms < min_divisor)] = 1 #EO
+    patches_normalized = patches_normalized / patch_normalized_norms[:, np.newaxis]# EO
+
+    return patches_normalized.reshape(orig_shape).astype('float32'), ZCA_operator, patches_mean
