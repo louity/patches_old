@@ -19,8 +19,8 @@ import torch.optim as optim
 from imagenet import Imagenet32
 from utils import progress_bar, grab_patches, grab_patches_from_loader, correct_topk,  normalize_patches_2
 
+print('learn_metric.py')
 parser = argparse.ArgumentParser('patch based classification on cifar10')
-
 # parameters for the patches
 parser.add_argument('--dataset', help="cifar10/?", default='cifar10')
 parser.add_argument('--no_padding', action='store_true', help='no padding used')
@@ -207,12 +207,40 @@ if not os.path.exists(patches_file) or args.force_recompute:
         print(f'patches randomly selected: {selected_patches.shape}')
         kernel_convolution = torch.from_numpy(selected_patches)
         kernel_convolution_2, ev_rs, V = torch.from_numpy(selected_patches_2), torch.from_numpy(1. / E).view(1, -1), torch.from_numpy(V)
+        # kernel_convolution_2, ev_rs, V = torch.from_numpy(selected_patches_2), torch.from_numpy(np.log(1. / E)).view(1, -1), torch.from_numpy(V)
+        # ev_rs = torch.from_numpy(np.array([[
+                # 998.76526,   996.02356,   996.1117,    995.213,     992.20233,
+                # 990.0952,    988.94507,   988.3544,    986.6686,    984.6542,
+                # 979.6812,    975.3906,    974.50336,   973.1308,    971.8635,
+                # 970.87445,   966.7036,    963.8863,    952.24146,   950.504,
+                # 944.94086,   943.97876,   940.152,     939.7242,    937.0456,
+                # 927.41296,   924.8435,    914.4774,    910.6891,    900.7839,
+                # 898.05176,   881.45526,   876.0542,    862.72906,   852.41205,
+                # 841.7788,    828.29895,   826.9402,    826.78815,   819.2701,
+                # 791.5647,    775.09174,   760.84863,   759.8779,    738.85693,
+                # 733.7491,    701.44836,   695.3558,    639.80817,   610.7298,
+                # 596.33234,   588.50415,   588.06854,   573.9486,    565.44574,
+                # 542.2374,    525.86,      503.75897,   478.29504,   422.9037,
+                # 397.92242,   381.68478,   369.82635,   354.4472,    335.8199,
+                # 323.56754,   300.46036,   293.01175,   280.30542,   274.3827,
+                # 269.98026,   221.96683,   215.17363,   206.52666,   190.2215,
+                # 155.29794,   139.95728,   140.07674,   132.65782,   126.579865,
+                # 124.358955,  120.27461,   118.73962,   118.61101,   106.52782,
+                # 83.98556,    84.31923,    68.42721,    67.072716,   50.381462,
+                # 42.14851,    41.085693,   39.083443,   38.263573,   34.909897,
+                # 27.90642,    20.941477,   18.278597,   17.690624,   16.681534,
+                # 9.647727,    8.503347,    7.669891,    6.3164864,   1.4311366,
+                # 1.9156379,   1.693179,    0.12278172]],
+                # dtype='float32')
+            # )
         ev_rescale = nn.Parameter(ev_rs.cuda(), requires_grad=True)
-        params = [ev_rescale]
+        params_metric = [ev_rescale]
         print(f'saving patches in file {patches_file}')
         torch.save(kernel_convolution, patches_file)
 else:
     kernel_convolution = torch.load(patches_file)
+
+params = []
 
 
 
@@ -336,10 +364,7 @@ def topk_heaviside_and_heaviside_half(x, k, bias=args.bias):
 
 
 if args.shrink == 'heaviside':
-    if args.learn_patches:
-        shrink = heaviside_float
-    else:
-        shrink = heaviside_half
+    shrink = heaviside_float
 elif args.shrink == 'topk':
     args.bias = int(args.topk_fraction * n_channel_convolution)
     if args.learn_patches:
@@ -358,8 +383,8 @@ elif args.shrink == 'topk_heaviside_and_heaviside':
 elif args.shrink == 'hardshrink':
     shrink = F.hardshrink
 elif args.shrink == 'softshrink':
-    # shrink = F.softshrink
-    shrink = lambda x, lambd: F.relu(x - lambd) - F.relu(-x - lambd)
+    shrink = F.softshrink
+    # shrink = lambda x, lambd: F.relu(x - lambd) - F.relu(-x - lambd)
 
 
 
@@ -456,8 +481,10 @@ def train(epoch):
 
         patches_shape = kernel_convolution_2.shape
         operator = (V * ev_rescale) @ V.t()
+        # operator = (V * torch.exp(ev_rescale)) @ V.t()
         zca_patches = kernel_convolution_2.view(patches_shape[0], -1) @ operator
         zca_patches_normalized = zca_patches / (zca_patches.norm(dim=1, keepdim=True) + 1e-8)
+        # zca_patches_normalized = zca_patches
         kernel_conv = zca_patches_normalized.view(patches_shape)
         outputs1, outputs2 = net(inputs, kernel_conv)
 
@@ -505,10 +532,11 @@ def test(epoch, loader=testloader, msg='Test'):
 
             patches_shape = kernel_convolution_2.shape
             operator = (V * ev_rescale) @ V.t()
+            # operator = (V * torch.exp(ev_rescale)) @ V.t()
             zca_patches = kernel_convolution_2.view(patches_shape[0], -1) @ operator
-            zca_patches /= zca_patches.norm(dim=1, keepdim=True) + 1e-8
-            zca_patches = zca_patches.view(patches_shape).contiguous()
-            kernel_conv = zca_patches
+            zca_patches_normalized = zca_patches /  zca_patches.norm(dim=1, keepdim=True) + 1e-8
+            # zca_patches_normalized = zca_patches
+            kernel_conv = zca_patches_normalized.view(patches_shape).contiguous()
 
             # outputs1, outputs2 = net(inputs, kernel_convolution[0])
             outputs1, outputs2 = net(inputs, kernel_conv)
@@ -571,16 +599,18 @@ if args.resume:
 
 start_time = time.time()
 best_test_acc, best_epoch = 0, -1
-with np.printoptions(precision=4, suppress=True):
+with np.printoptions(suppress=True):
     print(f'ev rescale initial {ev_rescale.data.cpu().numpy()}')
 
 for i in range(start_epoch, args.nepochs):
     if i in learning_rates:
+        params_dict = [{'params': params}, {'params': params_metric, 'lr': learning_rates[i]}]
+        # params_dict = [{'params': params}]
         print('new lr:'+str(learning_rates[i]))
         if args.optimizer == 'Adam':
-            optimizer = optim.Adam(params, lr=learning_rates[i], weight_decay=args.weight_decay)
+            optimizer = optim.Adam(params_dict, lr=learning_rates[i], weight_decay=args.weight_decay)
         elif args.optimizer == 'SGD':
-            optimizer = optim.SGD(params, lr=learning_rates[i], momentum=args.sgd_momentum, weight_decay=args.weight_decay)
+            optimizer = optim.SGD(params_dict, lr=learning_rates[i], momentum=args.sgd_momentum, weight_decay=args.weight_decay)
         else:
             raise NotImplementedError('optimizer {} not implemented'.format(args.optimizer))
     no_nan_in_train_loss = train(i)
@@ -588,7 +618,7 @@ for i in range(start_epoch, args.nepochs):
         print(f'Epoch {i}, nan in loss, stopping training')
         break
     test_acc, outputs = test(i)
-    print(f'ev rescale max {ev_rescale.data.max().item():.4f}, min {ev_rescale.data.min().item():.4f}')
+    print(f'ev rescale max {ev_rescale.data.max().item()}, min {ev_rescale.data.min().item():.4f}')
 
     if test_acc > best_test_acc:
         print(f'Best acc ({test_acc}).')
@@ -610,7 +640,7 @@ for i in range(start_epoch, args.nepochs):
                 })
         torch.save(state, checkpoint_file)
 
-with np.printoptions(precision=4, suppress=True):
+with np.printoptions(suppress=True):
     print(f'ev rescale final {ev_rescale.data.cpu().numpy()}')
 print(f'Best test acc. {best_test_acc}  at epoch {best_epoch}/{i}')
 hours = (time.time() - start_time) / 3600
