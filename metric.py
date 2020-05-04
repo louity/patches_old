@@ -16,7 +16,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 from imagenet import Imagenet32
-from utils import compute_zca_whitening, correct_topk, grab_patches
+from utils_metric import compute_whitening, correct_topk, select_patches_randomly, heaviside, topk, topk_heaviside, compute_classifier_outputs, create_classifier_blocks, compute_channel_mean_and_std
 
 print('metric.py')
 parser = argparse.ArgumentParser('classification on cifar10 based on patches comparison')
@@ -40,6 +40,8 @@ parser.add_argument('--positive_shrink', action='store_true', help='use positive
 
 # parameters of the classifier
 parser.add_argument('--batch_norm', action='store_true', help='add batchnorm before classifier')
+parser.add_argument('--no_affine_batch_norm', action='store_true', help='affine=False in batch norms')
+parser.add_argument('--normalize_net_outputs', action='store_true', help='precompute the mean and std of the outputs to normalize them (alternative to batch norm)')
 parser.add_argument('--bottleneck_dim', default=0, type=int, help='bottleneck dimension for the classifier')
 parser.add_argument('--batch_norm_bottleneck', action='store_true', help='add batchnorm in bottleneck')
 parser.add_argument('--separable_convolution', action='store_true', help='makes the classifier convolution separable in channels and space')
@@ -69,8 +71,6 @@ parser.add_argument('--torch_seed', type=int, default=0)
 parser.add_argument('--save_model', action='store_true', help='saves the model')
 parser.add_argument('--save_best_model', action='store_true', help='saves the best model')
 parser.add_argument('--resume', default='', help='filepath of checkpoint to load the model')
-
-# logs
 
 args = parser.parse_args()
 
@@ -103,8 +103,9 @@ train_sampler = None
 # Define the dataset
 if args.dataset == 'cifar10':
     spatial_size = 32
+    padding = 0 if args.no_padding else 4
     transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
+        transforms.RandomCrop(spatial_size, padding=padding),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
@@ -132,6 +133,7 @@ elif args.dataset in ['imagenet32', 'imagenet64', 'imagenet128']:
     if args.dataset=='imagenet128':
         spatial_size = 128
         padding = 16
+        # NOTE
         n_arrays_train = 99
     n_classes = 1000
 
@@ -172,13 +174,24 @@ if not os.path.exists(patches_file) or args.force_recompute:
             raise RuntimeError
         print(f'Trainset : {t.shape}')
 
-        patches, idx = grab_patches(t, seed=args.numpy_seed, patch_size=spatialsize_convolution)
-        zca_patches, zca_op, patches_mean = compute_zca_whitening(patches, zca_bias=args.zca_bias)
-        print(f'patches extracted and whitened: {patches.shape}')
+        patches = select_patches_randomly(t, seed=args.numpy_seed, patch_size=spatialsize_convolution)
+        print(f'patches extracted : {patches.shape}')
 
-        idxs = np.random.choice(zca_patches.shape[0], n_channel_convolution, replace=False)
-        selected_patches = zca_patches[idxs].astype(np.float32)
+        whitened_patches, whitening_op, patches_mean = compute_whitening(patches, zca_bias=args.zca_bias)
+        print(f'patches whitened : {whitened_patches.shape}')
+
+        normalized_whitened_patches = (
+                whitened_patches.reshape(patches.shape[0], -1) /
+                np.linalg.norm(whitened_patches.reshape(patches.shape[0], -1), axis=1, keepdims=True)
+            ).reshape(patches.shape)
+        print(f'patches normalized whitened : {normalized_whitened_patches.shape}')
+
+        idxs = np.random.choice(normalized_whitened_patches.shape[0], n_channel_convolution, replace=False)
+        selected_patches = normalized_whitened_patches[idxs].astype(np.float32)
         print(f'patches randomly selected: {selected_patches.shape}')
+
+        minus_whitened_patches_mean = -torch.from_numpy(patches_mean.dot(whitening_op))
+        whitening_operator = torch.from_numpy(whitening_op.T).view(whitening_op.shape[0], whitening_op.shape[1], 1, 1)
 
         kernel_convolution = torch.from_numpy(selected_patches).view(n_channel_convolution, -1, 1, 1)
         print(f'saving patches in file {patches_file}')
@@ -190,124 +203,36 @@ params = []
 
 
 
-def compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1, batch_norm2, classifier1, classifier2, classifier, batch_norm_bottleneck, train=True):
-    if args.batch_norm:
-        outputs1, outputs2 = batch_norm1(outputs1), batch_norm2(outputs2)
-
-
-    if args.convolutional_classifier == 0:
-        outputs1, outputs2 = outputs1.view(outputs1.size(0),-1), outputs2.view(outputs2.size(0),-1)
-
-    outputs1, outputs2 = classifier1(outputs1), classifier2(outputs2)
-    outputs = outputs1 + outputs2
-
-    if args.batch_norm_bottleneck:
-        outputs = batch_norm_bottleneck(outputs)
-
-    if args.convolutional_classifier > 0:
-        if args.separable_convolution or args.bottleneck_dim > 0:
-            outputs = classifier(outputs)
-            outputs = F.adaptive_avg_pool2d(outputs, 1)
-        else:
-            outputs = F.adaptive_avg_pool2d(outputs, 1)
-    elif args.bottleneck_dim > 0:
-        outputs = classifier(outputs)
-
-    outputs = outputs.view(outputs.size(0),-1)
-
-    return outputs, targets
-
-def create_classifier_blocks(out1, out2, args, params, n_classes):
-    batch_norm1, batch_norm2, classifier1, classifier2, classifier, batch_norm_bottleneck =  None, None, None, None, None, None
-
-    if args.batch_norm:
-        batch_norm1 = nn.BatchNorm2d(out1.size(1)).to(device).float()
-        batch_norm2 = nn.BatchNorm2d(out2.size(1)).to(device).float()
-        params += list(batch_norm1.parameters()) + list(batch_norm2.parameters())
-
-    if args.batch_norm_bottleneck:
-        batch_norm_bottleneck = nn.BatchNorm2d(args.bottleneck_dim).to(device).float()
-        params += list(batch_norm_bottleneck.parameters())
-
-
-    if args.convolutional_classifier > 0:
-        if args.separable_convolution:
-            if args.bottleneck_dim > 0:
-                classifier = nn.Sequential(
-                    nn.Conv2d(args.bottleneck_dim, n_classes, 1).to(device).float(),
-                    nn.Conv2d(n_classes, n_classes, args.convolutional_classifier, groups=n_classes).to(device).float()
-                )
-                classifier1 = nn.Conv2d(out1.size(1), args.bottleneck_dim, 1).to(device).float()
-                classifier2 = nn.Conv2d(out2.size(1), args.bottleneck_dim, 1).to(device).float()
-            else:
-                classifier = nn.Conv2d(n_classes, n_classes, args.convolutional_classifier, groups=n_classes).to(device).float()
-                classifier1 = nn.Conv2d(out1.size(1), n_classes, 1).to(device).float()
-                classifier2 = nn.Conv2d(out2.size(1), n_classes, 1).to(device).float()
-            params += list(classifier.parameters())
-        else:
-            if args.bottleneck_dim > 0:
-                classifier = nn.Conv2d(args.bottleneck_dim, n_classes, args.convolutional_classifier).to(device).float()
-                params += list(classifier.parameters())
-                classifier1 = nn.Conv2d(out1.size(1), args.bottleneck_dim, 1).to(device).float()
-                classifier2 = nn.Conv2d(out2.size(1), args.bottleneck_dim, 1).to(device).float()
-            else:
-                classifier1 = nn.Conv2d(out1.size(1), n_classes, args.convolutional_classifier).to(device).float()
-                classifier2 = nn.Conv2d(out2.size(1), n_classes, args.convolutional_classifier).to(device).float()
-    else:
-        out1, out2 = out1.view(out1.size(0), -1), out2.view(out1.size(0), -1)
-        if args.bottleneck_dim > 0:
-            classifier = nn.Linear(args.bottleneck_dim, n_classes).to(device).float()
-            params += list(classifier.parameters())
-            classifier1 = nn.Linear(out1.size(1), args.bottleneck_dim).to(device).float()
-            classifier2 = nn.Linear(out2.size(1), args.bottleneck_dim).to(device).float()
-        else:
-            classifier1 = nn.Linear(out1.size(1), n_classes).to(device).float()
-            classifier2 = nn.Linear(out2.size(1), n_classes).to(device).float()
-
-    params += list(classifier1.parameters()) + list(classifier2.parameters())
-
-    return batch_norm1, batch_norm2, classifier1, classifier2, classifier, batch_norm_bottleneck
-
-def heaviside_float(x, bias):
-    return (x > bias).float() - (x < -bias).float()
-
-def topk_float(x, k):
-    x_abs = torch.abs(x)
-    return (x_abs >= x_abs.topk(dim=1, k=k).values.min(dim=1, keepdim=True).values).float() * x.float()
-
-def topk_heaviside_float(x, k):
-    x_abs = torch.abs(x)
-    return (x_abs >= x_abs.topk(dim=1, k=k).values.min(dim=1, keepdim=True).values).float() * x.sign().float()
-
-
 if args.shrink == 'heaviside':
-    shrink = heaviside_float
+    shrink = heaviside
 elif args.shrink == 'topk':
     args.bias = int(args.topk_fraction * n_channel_convolution)
-    shrink = topk_float
+    shrink = topk
 elif args.shrink == 'topk_heaviside':
     args.bias = int(args.topk_fraction * n_channel_convolution)
-    shrink = topk_heaviside_float
+    shrink = topk_heaviside
 elif args.shrink == 'hardshrink':
     shrink = F.hardshrink
 elif args.shrink == 'softshrink':
     shrink = F.softshrink
 
 
-
 # Feature extractor
 class Net(nn.Module):
-    def __init__(self, spatialsize_convolution, spatialsize_avg_pooling, stride_avg_pooling, bias=1.0):
+    def __init__(self, n_patches_hw, spatialsize_convolution, spatialsize_avg_pooling, stride_avg_pooling, bias=1.0):
         super(Net, self).__init__()
         self.pool_size = spatialsize_avg_pooling
         self.pool_stride = stride_avg_pooling
         self.bias = bias
         self.conv_size = spatialsize_convolution
+        self.n_patches_hw = n_patches_hw
 
-    def forward(self, x, conv_weight):
-        # out = F.conv2d(x, conv_weight)
+    def forward(self, x, conv_weight, whitening_operator, minus_whitened_patches_mean):
         out = F.unfold(x, self.conv_size)
-        out = out.view(out.size(0), out.size(1), int(np.sqrt(out.size(2))), int(np.sqrt(out.size(2))))
+        out = out.view(out.size(0), out.size(1), self.n_patches_hw, self.n_patches_hw)
+        out = F.conv2d(out, whitening_operator, minus_whitened_patches_mean)
+        out = out / (out.norm(p=2, dim=1, keepdim=True))
+        out = out.half()
         out = F.conv2d(out, conv_weight)
 
         out = shrink(out, self.bias)
@@ -317,15 +242,21 @@ class Net(nn.Module):
         out = F.relu(out, inplace=True) # negative part
         out2 = F.avg_pool2d(out, [self.pool_size, self.pool_size], stride=[self.pool_stride, self.pool_stride],
                             ceil_mode=True)
-        return out1, out2
+        return out1.float(), out2.float()
+
+if torch.cuda.is_available():
+    kernel_convolution = kernel_convolution.half()
 
 criterion = nn.CrossEntropyLoss()
 
-net = Net(spatialsize_convolution, spatialsize_avg_pooling,
+
+n_patches_hw = spatial_size - spatialsize_convolution + 1
+net = Net(n_patches_hw, spatialsize_convolution, spatialsize_avg_pooling,
           stride_avg_pooling, bias=args.bias).to(device)
 
 kernel_convolution = kernel_convolution.to(device)
-
+whitening_operator = whitening_operator.to(device)
+minus_whitened_patches_mean = minus_whitened_patches_mean.to(device)
 
 x = torch.rand(1, 3, spatial_size, spatial_size).to(device)
 
@@ -336,10 +267,7 @@ else:
     cudnn.benchmark = True
 
 
-kernel_convolution_ = kernel_convolution
-
-out1, out2 = net(x, kernel_convolution_)
-out1, out2 = out1.float(), out2.float()
+out1, out2 = net(x, kernel_convolution, whitening_operator, minus_whitened_patches_mean)
 print(f'Net output size: out1 {out1.shape[-3:]} out2 {out2.shape[-3:]}')
 
 classifier_blocks = create_classifier_blocks(out1, out2, args, params, n_classes)
@@ -358,7 +286,7 @@ if torch.cuda.is_available() and not args.no_jit:
     print('optimizing net execution with torch.jit')
     trial = torch.rand(args.batchsize//n_gpus, 3, spatial_size, spatial_size).to(device)
 
-    inputs = {'forward': (trial, kernel_convolution[0])}
+    inputs = {'forward': (trial, kernel_convolution[0], whitening_operator, minus_whitened_patches_mean)}
     with torch.jit.optimized_execution(True):
         net = torch.jit.trace_module(net, inputs, check_trace=False, check_tolerance=False)
     del inputs
@@ -368,6 +296,10 @@ if torch.cuda.is_available() and not args.no_jit:
 if args.multigpu and n_gpus > 1:
     print(f'{n_gpus} available, using Dataparralel for net')
     net = nn.DataParallel(net)
+
+if args.normalize_net_outputs:
+    mean1, mean2, std1, std2 = compute_channel_mean_and_std(trainloader, net, n_channel_convolution,
+            kernel_convolution, whitening_operator, minus_whitened_patches_mean, n_epochs=1, seed=0)
 
 
 def train(epoch):
@@ -386,11 +318,19 @@ def train(epoch):
         inputs, targets = inputs.to(device), targets.to(device)
 
         with torch.no_grad():
+            if len(kernel_convolution) > 1:
+                outputs = []
+                for i in range(len(kernel_convolution)):
+                    outputs.append(net(inputs, kernel_convolution[i], whitening_operator, minus_whitened_patches_mean))
+                outputs1 = torch.cat([out[0] for out in outputs], dim=1)
+                outputs2 = torch.cat([out[1] for out in outputs], dim=1)
+                del outputs
+            else:
+                outputs1, outputs2 = net(inputs, kernel_convolution[0], whitening_operator, minus_whitened_patches_mean)
 
-            outputs1, outputs2 = net(inputs, kernel_convolution[0])
-
-            outputs1 = outputs1.float()
-            outputs2 = outputs2.float()
+            if args.normalize_net_outputs:
+                outputs1 = (outputs1 - mean1) / std1
+                outputs2 = (outputs2 - mean2) / std2
 
         optimizer.zero_grad()
         outputs, targets = compute_classifier_outputs(outputs1, outputs2, targets, args, batch_norm1,
@@ -412,6 +352,7 @@ def train(epoch):
         epoch, train_loss / (batch_idx + 1), 100. * correct / total, args.bias))
     return True
 
+
 def test(epoch, loader=testloader, msg='Test'):
     global best_acc
     net.eval()
@@ -427,11 +368,20 @@ def test(epoch, loader=testloader, msg='Test'):
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(loader):
             inputs, targets = inputs.to(device), targets.to(device)
+            if len(kernel_convolution) > 1:
+                outputs = []
+                for i in range(len(kernel_convolution)):
+                    outputs.append(net(inputs, kernel_convolution[i], whitening_operator, minus_whitened_patches_mean))
+                outputs1 = torch.cat([out[0] for out in outputs], dim=1)
+                outputs2 = torch.cat([out[1] for out in outputs], dim=1)
+                del outputs
+            else:
+                outputs1, outputs2 = net(inputs, kernel_convolution[0], whitening_operator, minus_whitened_patches_mean)
 
-            outputs1, outputs2 = net(inputs, kernel_convolution[0])
+            if args.normalize_net_outputs:
+                outputs1 = (outputs1 - mean1) / std1
+                outputs2 = (outputs2 - mean2) / std2
 
-            outputs1 = outputs1.float()
-            outputs2 = outputs2.float()
 
             outputs, targets = compute_classifier_outputs(
                 outputs1, outputs2, targets, args, batch_norm1,

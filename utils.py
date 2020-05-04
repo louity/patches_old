@@ -476,7 +476,8 @@ def compute_zca_whitening(patches, min_divisor=1e-8, zca_bias=0.001, ):
     inv_sqrt_zca_eigvals = np.diag(np.power(eigvals + zca_bias, -1/2))
     ZCA_operator = eigvecs.dot(inv_sqrt_zca_eigvals).dot(eigvecs.T)
 
-    patches_normalized = (patches).dot(ZCA_operator).dot(ZCA_operator.T)
+    # patches_normalized = (patches).dot(ZCA_operator).dot(ZCA_operator.T)
+    patches_normalized = (patches).dot(ZCA_operator) # .dot(ZCA_operator.T)
 
     # Normalize
     patch_normalized_norms = np.linalg.norm(patches_normalized, axis=1) #EO
@@ -485,4 +486,4 @@ def compute_zca_whitening(patches, min_divisor=1e-8, zca_bias=0.001, ):
     patch_normalized_norms[np.where(patch_normalized_norms < min_divisor)] = 1 #EO
     patches_normalized = patches_normalized / patch_normalized_norms[:, np.newaxis]# EO
 
-    return patches_normalized.reshape(orig_shape).astype('float32'), ZCA_operator, patches_mean
+    return patches_normalized.reshape(orig_shape).astype('float32'), ZCA_operator.astype('float32'), patches_mean.reshape(-1).astype('float32')
